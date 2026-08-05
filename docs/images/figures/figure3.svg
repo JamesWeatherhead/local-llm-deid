@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="460" viewBox="0 0 780 460" font-family="Helvetica,Arial,sans-serif"><rect x="0" y="0" width="780" height="460" fill="#FFFFFF"/>
+<text x="390.00" y="30.00" font-size="17.00" text-anchor="middle" fill="#222222" font-weight="bold">PHI removed vs non-PHI removed</text>
+<line x1="72.00" y1="390.00" x2="736.00" y2="390.00" stroke="#E8E8E8" stroke-width="1.00"/>
+<text x="64.00" y="394.00" font-size="11.00" text-anchor="end" fill="#555555">0.0</text>
+<line x1="72.00" y1="54.00" x2="72.00" y2="390.00" stroke="#F1F1F1" stroke-width="1.00"/>
+<text x="72.00" y="406.00" font-size="10.00" text-anchor="middle" fill="#555555">0.000</text>
+<line x1="72.00" y1="322.80" x2="736.00" y2="322.80" stroke="#E8E8E8" stroke-width="1.00"/>
+<text x="64.00" y="326.80" font-size="11.00" text-anchor="end" fill="#555555">0.2</text>
+<line x1="204.80" y1="54.00" x2="204.80" y2="390.00" stroke="#F1F1F1" stroke-width="1.00"/>
+<text x="204.80" y="406.00" font-size="10.00" text-anchor="middle" fill="#555555">0.036</text>
+<line x1="72.00" y1="255.60" x2="736.00" y2="255.60" stroke="#E8E8E8" stroke-width="1.00"/>
+<text x="64.00" y="259.60" font-size="11.00" text-anchor="end" fill="#555555">0.4</text>
+<line x1="337.60" y1="54.00" x2="337.60" y2="390.00" stroke="#F1F1F1" stroke-width="1.00"/>
+<text x="337.60" y="406.00" font-size="10.00" text-anchor="middle" fill="#555555">0.072</text>
+<line x1="72.00" y1="188.40" x2="736.00" y2="188.40" stroke="#E8E8E8" stroke-width="1.00"/>
+<text x="64.00" y="192.40" font-size="11.00" text-anchor="end" fill="#555555">0.6</text>
+<line x1="470.40" y1="54.00" x2="470.40" y2="390.00" stroke="#F1F1F1" stroke-width="1.00"/>
+<text x="470.40" y="406.00" font-size="10.00" text-anchor="middle" fill="#555555">0.108</text>
+<line x1="72.00" y1="121.20" x2="736.00" y2="121.20" stroke="#E8E8E8" stroke-width="1.00"/>
+<text x="64.00" y="125.20" font-size="11.00" text-anchor="end" fill="#555555">0.8</text>
+<line x1="603.20" y1="54.00" x2="603.20" y2="390.00" stroke="#F1F1F1" stroke-width="1.00"/>
+<text x="603.20" y="406.00" font-size="10.00" text-anchor="middle" fill="#555555">0.144</text>
+<line x1="72.00" y1="54.00" x2="736.00" y2="54.00" stroke="#E8E8E8" stroke-width="1.00"/>
+<text x="64.00" y="58.00" font-size="11.00" text-anchor="end" fill="#555555">1.0</text>
+<line x1="736.00" y1="54.00" x2="736.00" y2="390.00" stroke="#F1F1F1" stroke-width="1.00"/>
+<text x="736.00" y="406.00" font-size="10.00" text-anchor="middle" fill="#555555">0.180</text>
+<line x1="72.00" y1="54.00" x2="72.00" y2="390.00" stroke="#333333" stroke-width="1.00"/>
+<line x1="72.00" y1="390.00" x2="736.00" y2="390.00" stroke="#333333" stroke-width="1.00"/>
+<text x="20.00" y="222.00" font-size="12.00" text-anchor="middle" fill="#555555" transform="rotate(-90.00 20.00 222.00)">char recall (PHI removed)</text>
+<text x="404.00" y="436.00" font-size="12.00" text-anchor="middle" fill="#555555">over-redaction rate (non-PHI characters removed)</text>
+<circle cx="603.20" cy="128.22" r="6.00" fill="#4C78A8" stroke="#FFFFFF" stroke-width="1.5"/>
+<text x="613.20" y="132.22" font-size="11.00" text-anchor="start" fill="#222222">gemma-3-1b-it</text>
+</svg>

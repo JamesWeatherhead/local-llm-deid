@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: unittest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run the test suite (standard library only)
+        run: python -m unittest discover -s tests -v
+
+  checks:
+    name: script and config checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Syntax-check the orchestrator script
+        run: bash -n scripts/run_local_end_to_end.sh
+      - name: Model configs are in sync with their generator
+        run: |
+          python model_configs/build_configs.py
+          git diff --exit-code model_configs

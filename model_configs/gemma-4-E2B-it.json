@@ -1,0 +1,12 @@
+{
+  "developer": "Google",
+  "family": "Gemma-4",
+  "hf_gguf_repo": "google/gemma-4-E2B-it",
+  "is_medical": false,
+  "moe": false,
+  "params_active_B": null,
+  "params_total_B": 2.3,
+  "quant_target": "BF16",
+  "reasoning": false,
+  "size_gb": 9.31
+}
