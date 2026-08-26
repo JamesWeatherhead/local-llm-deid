@@ -64,10 +64,12 @@ def load_models():
 
 
 def format_params(cfg) -> str:
-    """``30.7``, or ``25.2 (3.8 active)`` for a mixture-of-experts model."""
+    """Render dense, total/effective, or total/active parameter counts."""
     total = "{:.1f}".format(cfg["params_total_B"])
+    if cfg.get("params_effective_B") is not None:
+        return "{}/{:.1f}".format(total, cfg["params_effective_B"])
     if cfg.get("moe") and cfg.get("params_active_B") is not None:
-        return "{} ({:.1f} active)".format(total, cfg["params_active_B"])
+        return "{}/{:.1f}".format(total, cfg["params_active_B"])
     return total
 
 

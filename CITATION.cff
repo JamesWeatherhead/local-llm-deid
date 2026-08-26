@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the accompanying manuscript and this repository release."
+title: "Clinical Text De-identification with Locally Deployed Open-Weight LLMs: companion code"
+type: software
+authors:
+  - family-names: Weatherhead
+    given-names: James
+  - family-names: Cwiklik
+    given-names: Emily
+  - family-names: McCaffrey
+    given-names: Peter
+  - family-names: Golovko
+    given-names: George
+version: 1.0.1
+date-released: 2026-08-25
+repository-code: "https://github.com/JamesWeatherhead/local-llm-deid"
+url: "https://github.com/JamesWeatherhead/local-llm-deid"
+license: MIT

@@ -1,7 +1,10 @@
 # Data dictionary
 
-The scorer (`deid.metrics`) writes four files into its output directory. All are
-PHI-free: they contain offsets, counts, and rates only, never identifier text.
+The scorer (`deid.metrics`) writes four files into its output directory. They
+omit identifier literals, but they are not guaranteed to be non-sensitive:
+document IDs, source hashes, model IDs, local provenance, and small-cell counts
+can be identifying or confidential in a real clinical workflow. Keep the whole
+output tree under the controls required by the governing protocol.
 
 - `metrics_long.csv` — the main results table (one row per model × pass × cohort × PHI type)
 - `per_doc_long.csv` — per-note character counts and reliability (one row per model × note × pass)
@@ -31,17 +34,20 @@ crosswalk (tables, figures, and methods) is in
 - `usable_rate` is the manuscript's "usable structured response"; `json_valid_rate`
   is its strict-JSON-valid measure.
 - `zero_residual_note_rate` is the manuscript's complete-removal-per-note measure.
-- The manuscript reports the `all_expected` cohort with micro-averaging and the
-  mean of three temperature-0 runs. The `operational_complete` cohort, every
-  `*_macro` column, and `finish_stop_rate` are diagnostics it does not report, and
-  this scorer scores a single run.
-- The results table's 95% confidence interval for PHI removed is a note-level
-  bootstrap over `per_doc_long.csv`, reproduced by `scripts/bootstrap_ci.py`
-  (10,000 resamples, seed 20260801); the scorer itself emits point estimates only.
+- The manuscript reports the `all_expected` cohort with micro-averaging and
+  means across three separate temperature-0 stability executions. The
+  `operational_complete` cohort, every `*_macro` column, and `finish_stop_rate`
+  are diagnostics it does not report; the scorer produces one execution at a
+  time.
+- The results table's 95% confidence intervals for character recall and
+  completeness are note-level bootstraps reproduced by `scripts/bootstrap_ci.py`
+  (10,000 resamples, seed 20260801). Repeat `--per-doc` for all three matched
+  executions; the script averages stored values by note before resampling. The
+  scorer itself emits point estimates only.
 
 Per-column definitions follow.
 
-## `metrics_long.csv` (69 columns)
+## `metrics_long.csv` (70 columns)
 
 Each model emits one `ALL` row per (pass, cohort) carrying every column, plus one
 partial row per gold PHI type present. On the per-type rows only recall,
@@ -62,12 +68,13 @@ that file is absent (as in the synthetic fixture run).
 | `developer` | Organization that trained the base model. |
 | `family` | Model family. |
 | `params_total_B` | Total parameters, in billions. |
+| `params_effective_B` | Effective parameters, in billions, when the developer distinguishes them from the total (Gemma-4 E2B/E4B). |
 | `params_active_B` | Active parameters per token, in billions (mixture-of-experts only). |
 | `moe` | Whether the model is mixture-of-experts. |
 | `is_medical` | Whether the model is domain-adapted for medicine. |
 | `is_reasoning` | Whether the model is a dedicated reasoning model. |
 | `quant` | Quantization of the evaluated GGUF (e.g. `Q5_K_M`). |
-| `n_docs` | Number of notes this model produced Pass-1 output for. |
+| `n_docs` | Number of notes defined by the gold set; missing model outputs remain in scope and score as full misses. |
 | `doc_provenance` | Reserved provenance label (blank in this release). |
 
 ### Row keys
@@ -76,7 +83,7 @@ that file is absent (as in the synthetic fixture run).
 | --- | --- |
 | `pass` | `pass1` or `cumulative_pass2` (Pass 1 ∪ the applied Pass 2). |
 | `surface` | Redaction surface scored; always `final`. |
-| `cohort` | `all_expected` (every note; a missing output is a full miss) or `operational_complete` (only notes whose every segment finished cleanly and, where validated, was usable). |
+| `cohort` | `all_expected` (every gold note; a missing output is a full miss) or `operational_complete` (only notes whose every segment finished with `stop` and, where validation records exist, was usable). |
 | `phi_type` | `ALL` for the note-wide row, or a two-digit Safe Harbor code (`01_NAME`, `02_GEOGRAPHIC_SUBDIVISION`, …) for a per-category row. |
 
 ### Totals
@@ -120,11 +127,14 @@ signal lives on the per-type rows.
 | `char_precision_typematched` | Same-type-covered gold chars / chars predicted as this type. |
 | `char_f1_typematched` | Harmonic mean of the two. |
 
-### Span / entity level
+### Span level
 
 Four detection criteria per gold span: any overlap, full coverage, strict
 (exact boundary) match, and relaxed (both boundaries within ±2 codepoints,
 i2b2-style).
+
+Strict and relaxed boundary matches are non-exclusive: one prediction may
+qualify more than one nearby gold span, and vice versa.
 
 | Column | Meaning |
 | --- | --- |
@@ -195,7 +205,7 @@ One row per model × note × pass.
 | `zero_residual` | `1` if the note has no residual PHI, else `0`. |
 | `gt_spans`, `any_span_hits` | Gold spans and how many had ≥1 char covered. |
 | `n_segments`, `usable_segments`, `finish_stop` | Per-note reliability counts. |
-| `operational_complete` | `1` if every segment finished cleanly (drives the cohort split). |
+| `operational_complete` | `1` if every segment finished with `stop` and, where validated, was usable (drives the cohort split). |
 
 ## `model_manifest.csv`
 
@@ -205,6 +215,6 @@ by `;`) and `model_dir` (its output subdirectory).
 
 ## `run_manifest.json`
 
-A machine-readable description of the run: the gold source, the coordinate unit,
+A machine-readable description of the run: the gold-directory label (basename only), the coordinate unit,
 the recall and span-recall definitions, the relaxed tolerance, the averaging
 convention, the list of models scored, and the row/column counts of the tables.

@@ -11,9 +11,11 @@
 #
 # By default it runs on the bundled synthetic, PHI-free fixture, so the whole
 # chain works with no real data and no weights beyond the model you pick. Point
-# --notes-dir / --gold-dir at your own corpus to reproduce the study, and add
-# --strip-raw-content there to keep the out/ tree free of PHI. Model metadata is
-# resolved automatically from model_configs/<model-id>.json when present.
+# --notes-dir / --gold-dir at your own corpus to reproduce the study. Verbatim
+# model text is stripped from persisted raw responses by default. Use
+# --retain-raw-content --acknowledge-phi-risk only inside approved controlled
+# storage. Model metadata
+# is resolved automatically from model_configs/<model-id>.json when present.
 #
 # Usage:
 #   scripts/run_local_end_to_end.sh --gguf models/gemma-3-1b-it/gemma-3-1b-it-Q8_0.gguf
@@ -21,6 +23,7 @@
 #   scripts/run_local_end_to_end.sh --gguf /path/model.gguf --notes-dir /data/notes --gold-dir /data/gold
 #
 set -euo pipefail
+umask 077
 
 # --- defaults ---------------------------------------------------------------
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,7 +40,9 @@ CTX_SIZE="8192"
 NGL="999"           # offload all layers to the Metal GPU on Apple Silicon
 LOAD_TIMEOUT="600"  # seconds to wait for the model to finish loading
 MODEL_CONFIG=""     # optional model_config.json (auto-resolved from --model-id)
-STRIP_RAW=""        # set by --strip-raw-content to keep out/ PHI-free
+RETAIN_RAW=""       # explicit opt-in; generated text can contain PHI
+ACK_PHI_RISK=""     # second explicit acknowledgement required with retained content
+OVERWRITE_MODEL_OUTPUT=""  # explicit replacement of this model's prior output only
 
 # Print the leading comment block as help: skip the shebang, strip the "# "
 # prefix, and stop at the first line of real code (so section dividers below
@@ -59,11 +64,19 @@ while [ $# -gt 0 ]; do
     --ctx-size)      CTX_SIZE="$2"; shift 2 ;;
     --n-gpu-layers)  NGL="$2"; shift 2 ;;
     --model-config)  MODEL_CONFIG="$2"; shift 2 ;;
-    --strip-raw-content) STRIP_RAW="1"; shift ;;
+    --strip-raw-content) RETAIN_RAW=""; shift ;;
+    --retain-raw-content) RETAIN_RAW="1"; shift ;;
+    --acknowledge-phi-risk) ACK_PHI_RISK="1"; shift ;;
+    --overwrite-model-output) OVERWRITE_MODEL_OUTPUT="1"; shift ;;
     -h|--help)       usage 0 ;;
     *) echo "unknown argument: $1" >&2; usage 1 ;;
   esac
 done
+
+case "$HOST" in
+  127.0.0.1|localhost) ;;
+  *) echo "refusing non-loopback llama-server bind for clinical text: $HOST" >&2; exit 1 ;;
+esac
 
 # --- 0. required tools ------------------------------------------------------
 command -v llama-server >/dev/null || { echo "llama-server not found. Install llama.cpp:  brew install llama.cpp" >&2; exit 1; }
@@ -132,7 +145,9 @@ RUN_ARGS=(--model-id "$MODEL_ID" --notes-dir "$NOTES_DIR"
     --out-dir "$OUT_DIR/predictions" --protocol-dir "$REPO_ROOT/protocol"
     --api-base "http://$HOST:$PORT")
 [ -n "$MODEL_CONFIG" ] && RUN_ARGS+=(--model-config "$MODEL_CONFIG")
-[ -n "$STRIP_RAW" ] && RUN_ARGS+=(--strip-raw-content)
+[ -n "$RETAIN_RAW" ] && RUN_ARGS+=(--retain-raw-content)
+[ -n "$ACK_PHI_RISK" ] && RUN_ARGS+=(--acknowledge-phi-risk)
+[ -n "$OVERWRITE_MODEL_OUTPUT" ] && RUN_ARGS+=(--overwrite-model-output)
 PYTHONPATH="$REPO_ROOT/src" python3 -m deid.run_model "${RUN_ARGS[@]}"
 
 # --- 5. scoring -------------------------------------------------------------

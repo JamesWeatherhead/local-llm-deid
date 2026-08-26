@@ -182,7 +182,8 @@ class FigureGenerationTest(unittest.TestCase):
                   use_stub=True, name_gazetteer=NAMES)
         results = metrics.score_all(work / "predictions", GOLD_DIR)
         metrics.write_outputs(out_dir, GOLD_DIR, results)
-        exit_code = make_figures.main(["--metrics", str(out_dir / "metrics_long.csv"),
+        cls.metrics_path = out_dir / "metrics_long.csv"
+        exit_code = make_figures.main(["--metrics", str(cls.metrics_path),
                                        "--out-dir", str(cls.fig_dir)])
         assert exit_code == 0
 
@@ -219,6 +220,35 @@ class FigureGenerationTest(unittest.TestCase):
         # Geographic subdivisions are the stub's only leak; overall = 253/335.
         self.assertAlmostEqual(float(row["geographic"]), 0.0)
         self.assertAlmostEqual(float(row["overall"]), 253 / 335)
+
+    def test_multiple_metric_executions_are_averaged_before_plotting(self) -> None:
+        second_metrics = Path(self._tmp.name) / "second_metrics.csv"
+        rows = read_rows(self.metrics_path)
+        original = next(
+            row for row in rows
+            if row["pass"] == "cumulative_pass2" and row["cohort"] == "all_expected"
+            and row["phi_type"] == "ALL"
+        )
+        original_recall = float(original["char_recall"])
+        second_recall = 0.5
+        for row in rows:
+            if (row["pass"] == "cumulative_pass2" and row["cohort"] == "all_expected"
+                    and row["phi_type"] == "ALL"):
+                row["char_recall"] = str(second_recall)
+        with second_metrics.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+
+        averaged_dir = Path(self._tmp.name) / "averaged_figures"
+        exit_code = make_figures.main([
+            "--metrics", str(self.metrics_path), "--metrics", str(second_metrics),
+            "--out-dir", str(averaged_dir),
+        ])
+        self.assertEqual(exit_code, 0)
+        averaged_row = read_rows(averaged_dir / "figure2.csv")[0]
+        expected = (original_recall + second_recall) / 2
+        self.assertAlmostEqual(float(averaged_row["char_recall"]), expected)
 
 
 if __name__ == "__main__":

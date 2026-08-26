@@ -7,4 +7,4 @@ Modules:
     metrics    -- re-derive character/span/note/reliability metrics from gold
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"

@@ -6,7 +6,7 @@
 #   make test     run the offline test suite
 #   make configs  regenerate model_configs/<model-id>.json
 #   make figures  render Figures 2-6 (SVG + CSV) from metrics_long.csv
-#   make all      selftest + tables + ci + figures
+#   make all      selftest + tables + ci + figures + tests
 #   make clean    remove the out/ directory
 #
 # Everything here is standard-library Python and runs offline. Override the
@@ -25,7 +25,8 @@ help:
 selftest:
 	PYTHONPATH=src $(PY) -m deid.run_model --model-id offline-stub \
 	    --notes-dir $(NOTES) --out-dir $(OUT)/predictions \
-	    --protocol-dir protocol --offline-stub --name-file fixtures/synthetic/name_gazetteer.txt
+	    --protocol-dir protocol --offline-stub --name-file fixtures/synthetic/name_gazetteer.txt \
+	    --overwrite-model-output
 	PYTHONPATH=src $(PY) -m deid.metrics \
 	    --pred-dir $(OUT)/predictions --gold-dir $(GOLD) --out-dir $(OUT)
 	$(PY) scripts/make_results_table.py --metrics $(OUT)/metrics_long.csv
@@ -59,4 +60,4 @@ configs:
 clean:
 	rm -rf $(OUT)
 
-all: selftest tables ci figures
+all: selftest tables ci figures test

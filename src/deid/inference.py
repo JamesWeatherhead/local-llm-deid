@@ -38,6 +38,18 @@ SEED = 42
 REASONING_EFFORT = "low"
 
 
+def _error_envelope(model_id: str, error_field: str, error_code: str) -> dict[str, Any]:
+    """Return the standard recorded envelope for a failed server response."""
+    return {
+        "choices": [{"index": 0, "finish_reason": "error",
+                     "message": {"role": "assistant", "content": ""}}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "model": model_id,
+        "object": "chat.completion",
+        error_field: error_code,
+    }
+
+
 def build_payload(model_id: str, system_prompt: str, user_template: str,
                   segment_text: str, schema: dict[str, Any]) -> dict[str, Any]:
     """Assemble the chat-completions request body for one segment."""
@@ -98,17 +110,16 @@ class LlamaServerClient:
         try:
             with self._opener.open(request, timeout=self.request_timeout) as response:
                 envelope = json.loads(response.read().decode("utf-8"))
+            if not isinstance(envelope, dict):
+                envelope = _error_envelope(self.model_id, "response_error", "non_object_json")
+        except UnicodeDecodeError:
+            envelope = _error_envelope(self.model_id, "response_error", "invalid_utf8")
+        except json.JSONDecodeError:
+            envelope = _error_envelope(self.model_id, "response_error", "invalid_json")
         except (urllib.error.URLError, OSError) as exc:
             # Surface transport failure as an explicit non-stop envelope rather
             # than raising, so the runner can record it like any other outcome.
-            envelope = {
-                "choices": [{"index": 0, "finish_reason": "error",
-                             "message": {"role": "assistant", "content": ""}}],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-                "model": self.model_id,
-                "object": "chat.completion",
-                "transport_error": type(exc).__name__,
-            }
+            envelope = _error_envelope(self.model_id, "transport_error", type(exc).__name__)
         envelope.setdefault("latency_seconds", time.monotonic() - started)
         return envelope
 

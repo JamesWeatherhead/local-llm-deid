@@ -28,7 +28,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
+import tempfile
+import urllib.parse
 from pathlib import Path
 from typing import Any, Optional
 
@@ -49,13 +53,32 @@ from .pipeline import (
 )
 
 DOC_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def write_private_text(path: Path, text: str) -> None:
+    """Atomically write a private file, creating a private parent directory."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        os.replace(temporary_path, path)
+        path.chmod(0o600)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
 
 
 def write_json(path: Path, obj: Any) -> None:
-    """Write ``obj`` as pretty, deterministic JSON, creating parent dirs."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Write ``obj`` as deterministic, private JSON via an atomic replacement."""
     text = json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-    path.write_text(text, encoding="utf-8")
+    write_private_text(path, text)
 
 
 def load_protocol(protocol_dir: Path) -> tuple[str, str, dict[str, Any]]:
@@ -74,13 +97,29 @@ def _run_segments(client, segments) -> tuple[list, list[dict[str, Any]]]:
     records: list[dict[str, Any]] = []
     for segment in segments:
         envelope = client.complete(segment.text)
-        choice = (envelope.get("choices") or [{}])[0]
+        if not isinstance(envelope, dict):
+            envelope = {
+                "choices": [{"index": 0, "finish_reason": "error",
+                             "message": {"role": "assistant", "content": ""}}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "object": "chat.completion",
+                "response_error": "non_object_envelope",
+            }
+        choices = envelope.get("choices")
+        choice = choices[0] if (isinstance(choices, list) and choices
+                                and isinstance(choices[0], dict)) else {}
         finish_reason = choice.get("finish_reason") or "error"
-        content = (choice.get("message") or {}).get("content") or ""
-        usage = envelope.get("usage") or {}
+        message = choice.get("message")
+        content_value = message.get("content") if isinstance(message, dict) else ""
+        content = content_value if isinstance(content_value, str) else ""
+        usage_value = envelope.get("usage")
+        usage = usage_value if isinstance(usage_value, dict) else {}
 
         usable = strict = False
-        if finish_reason == "stop" and content:
+        # Format usability describes the returned content, independently of why
+        # generation stopped. The finish reason remains a separate operational
+        # signal and is still part of the all-segments Pass-2 application gate.
+        if content:
             try:
                 validated = validate_response(strict_json_loads(content), segment.text)
                 usable = validated["envelope_usable"]
@@ -95,41 +134,64 @@ def _run_segments(client, segments) -> tuple[list, list[dict[str, Any]]]:
             "finish_reason": finish_reason,
             "envelope_usable": usable,
             "strict_schema_valid": strict,
-            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-            "completion_tokens": int(usage.get("completion_tokens") or 0),
+            "prompt_tokens": (usage.get("prompt_tokens")
+                              if type(usage.get("prompt_tokens")) is int else 0),
+            "completion_tokens": (usage.get("completion_tokens")
+                                  if type(usage.get("completion_tokens")) is int else 0),
         })
     return pairs, records
 
 
-def _strip_envelope_content(envelope: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of the model envelope with the generated text removed.
+def _telemetry_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Project a server response onto the non-content fields the scorer uses.
 
-    The scorer reads only ``finish_reason`` and ``usage`` from raw responses,
-    never the message content, so blanking that content (which on real data
-    quotes back the PHI the model found) keeps every metric identical while
-    making the persisted ``raw_responses`` free of PHI.
+    This is an allowlist rather than a content-field denylist. Unexpected API
+    fields are therefore not persisted if a server echoes part of the prompt or
+    generated answer somewhere outside ``choices[].message.content``.
     """
-    stripped = dict(envelope)
-    choices = []
-    for choice in envelope.get("choices") or []:
-        choice = dict(choice)
-        message = dict(choice.get("message") or {})
-        if "content" in message:
-            message["content"] = ""
-        message.pop("reasoning_content", None)
-        choice["message"] = message
-        choices.append(choice)
-    if choices:
-        stripped["choices"] = choices
-    return stripped
+    choices_value = envelope.get("choices")
+    choice = (choices_value[0] if isinstance(choices_value, list) and choices_value
+              and isinstance(choices_value[0], dict) else {})
+    usage_value = envelope.get("usage")
+    usage = usage_value if isinstance(usage_value, dict) else {}
+
+    telemetry: dict[str, Any] = {
+        "object": (envelope.get("object")
+                   if isinstance(envelope.get("object"), str) else "chat.completion"),
+        "model": envelope.get("model") if isinstance(envelope.get("model"), str) else "",
+        "choices": [{
+            "index": choice.get("index") if type(choice.get("index")) is int else 0,
+            "finish_reason": (choice.get("finish_reason")
+                              if isinstance(choice.get("finish_reason"), str) else "error"),
+            "message": {"role": "assistant", "content": ""},
+        }],
+        "usage": {
+            key: value for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+            if type((value := usage.get(key))) is int
+        },
+        "content_retained": False,
+    }
+    for key in ("latency_seconds",):
+        value = envelope.get(key)
+        if type(value) in (int, float):
+            telemetry[key] = value
+    for key in ("response_error", "transport_error"):
+        value = envelope.get(key)
+        if isinstance(value, str):
+            telemetry[key] = value
+    return telemetry
 
 
 def _persist_segments(base_dir: Path, doc_id: str, pass_number: int, records: list[dict[str, Any]],
-                      strip_content: bool = False) -> None:
+                      strip_content: bool = True) -> None:
     """Write the raw-response and validation artifacts the scorer reads."""
     for record in records:
         scope_id = f"P{pass_number}-{record['segment'].segment_id}"
-        envelope = _strip_envelope_content(record["envelope"]) if strip_content else record["envelope"]
+        if strip_content:
+            envelope = _telemetry_envelope(record["envelope"])
+        else:
+            envelope = dict(record["envelope"])
+            envelope["content_retained"] = True
         write_json(base_dir / "raw_responses" / doc_id / f"{scope_id}.raw.json", envelope)
         write_json(base_dir / "validation" / doc_id / f"{scope_id}.validation.json", {
             "document_id": doc_id,
@@ -143,13 +205,15 @@ def _persist_segments(base_dir: Path, doc_id: str, pass_number: int, records: li
 
 def process_document(client, doc_id: str, source: str, model_dir: Path,
                      segment_size: int = SEGMENT_SIZE, overlap: int = SEGMENT_OVERLAP,
-                     strip_content: bool = False) -> None:
+                     strip_content: bool = True) -> None:
     """Run both passes for one note and write all artifacts.
 
     ``segment_size`` and ``overlap`` control the segmentation windows. Their
     defaults (3,500 and 400 codepoints) are the values used for the study; change
     them here or with the ``--segment-size`` / ``--overlap`` command-line flags.
-    ``strip_content`` blanks the model text in the persisted raw responses.
+    ``strip_content`` persists an allowlisted telemetry-only response by default.
+    Retaining the full response requires explicit acknowledgement
+    because real-data responses can quote protected health information.
     """
     # --- Pass 1: over the original note ---
     segments = fixed_segments(source, segment_size, overlap)
@@ -192,22 +256,81 @@ def run_model(model_id: str, notes_dir: Path, out_dir: Path, protocol_dir: Path,
               use_stub: bool = False, api_base: str = "http://127.0.0.1:8081",
               name_gazetteer: Optional[list[str]] = None,
               segment_size: int = SEGMENT_SIZE, overlap: int = SEGMENT_OVERLAP,
-              model_config: Optional[Path] = None, strip_content: bool = False,
-              request_timeout: Optional[float] = None) -> Path:
+              model_config: Optional[Path] = None, strip_content: bool = True,
+              request_timeout: Optional[float] = None,
+              overwrite_model_output: bool = False,
+              allow_remote_api: bool = False,
+              acknowledge_phi_risk: bool = False) -> Path:
     """Run ``model_id`` over every ``*.txt`` note in ``notes_dir``."""
-    client = make_client(model_id, protocol_dir, use_stub, api_base, name_gazetteer, request_timeout)
-    model_dir = out_dir / model_id
+    if not MODEL_ID_PATTERN.fullmatch(model_id):
+        raise ValueError(
+            "model_id must be one safe path component containing only letters, "
+            "numbers, '.', '_', and '-'"
+        )
+    if not strip_content and not acknowledge_phi_risk:
+        raise ValueError(
+            "retaining model response content may persist PHI; also pass "
+            "--acknowledge-phi-risk after confirming approved controlled storage"
+        )
+    parsed_api = urllib.parse.urlparse(api_base)
+    api_host = parsed_api.hostname
+    if not use_stub:
+        if parsed_api.scheme not in {"http", "https"} or api_host is None:
+            raise ValueError("api_base must be an absolute HTTP(S) URL with a hostname")
+        if parsed_api.username is not None or parsed_api.password is not None:
+            raise ValueError("api_base must not contain embedded credentials")
+        is_loopback = api_host in {"127.0.0.1", "localhost", "::1"}
+        if not is_loopback:
+            if parsed_api.scheme != "https":
+                raise ValueError("refusing non-loopback api_base without HTTPS")
+            if not allow_remote_api:
+                raise ValueError(
+                    "refusing non-loopback api_base for clinical text; pass --allow-remote-api "
+                    "only after confirming the endpoint and transport are institutionally approved"
+                )
     notes = sorted(notes_dir.glob("*.txt"))
     if not notes:
         raise FileNotFoundError(f"no notes found in {notes_dir}")
 
-    # Optional metadata: copy the model_config.json the scorer carries into results.
+    model_config_text: Optional[str] = None
     if model_config is not None:
         if not model_config.exists():
             raise FileNotFoundError(f"model config not found: {model_config}")
-        model_dir.mkdir(parents=True, exist_ok=True)
-        (model_dir / "model_config.json").write_text(
-            model_config.read_text(encoding="utf-8"), encoding="utf-8")
+        # Read before a possible narrowly scoped overwrite in case the caller
+        # supplied a config path inside the existing per-model subtree.
+        model_config_text = model_config.read_text(encoding="utf-8")
+
+    # Validate configuration and load the protocol before an explicitly
+    # requested overwrite removes any prior artifacts.
+    fixed_segments("", segment_size, overlap)
+    client = make_client(model_id, protocol_dir, use_stub, api_base, name_gazetteer, request_timeout)
+
+    if out_dir.is_symlink():
+        raise ValueError(f"refusing symlinked output directory: {out_dir}")
+    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    out_dir.chmod(0o700)
+
+    model_dir = out_dir / model_id
+    if model_dir.is_symlink():
+        raise ValueError(f"refusing to use symlinked model output directory: {model_dir}")
+    if model_dir.exists():
+        if not overwrite_model_output:
+            raise FileExistsError(
+                f"model output already exists: {model_dir}; use a new output directory "
+                "or pass --overwrite-model-output to replace only this model's artifacts"
+            )
+        if not model_dir.is_dir():
+            raise ValueError(f"refusing to overwrite non-directory model output: {model_dir}")
+        # The model id is constrained to one safe path component above, so this
+        # removes only the explicitly selected per-model subtree.
+        shutil.rmtree(model_dir)
+
+    model_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+    model_dir.chmod(0o700)
+
+    # Optional metadata: copy the model_config.json the scorer carries into results.
+    if model_config_text is not None:
+        write_private_text(model_dir / "model_config.json", model_config_text)
 
     for note_path in notes:
         doc_id = note_path.stem
@@ -239,10 +362,30 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"overlap between windows in codepoints (study default: {SEGMENT_OVERLAP})")
     parser.add_argument("--model-config", type=Path, default=None,
                         help="model_config.json to copy into the output dir (metadata for the scorer)")
-    parser.add_argument("--strip-raw-content", action="store_true",
-                        help="blank the model text in raw_responses so out/ holds no PHI (metrics unchanged)")
+    raw_group = parser.add_mutually_exclusive_group()
+    raw_group.add_argument(
+        "--strip-raw-content", dest="strip_raw_content", action="store_true",
+        help="blank model text in raw_responses (default; retained for compatibility)",
+    )
+    raw_group.add_argument(
+        "--retain-raw-content", dest="strip_raw_content", action="store_false",
+        help="retain verbatim model responses; may contain PHI and requires controlled storage",
+    )
+    parser.set_defaults(strip_raw_content=True)
     parser.add_argument("--request-timeout", type=float, default=None,
                         help="per-request timeout in seconds (default: none; set it to fail a hung server)")
+    parser.add_argument(
+        "--overwrite-model-output", action="store_true",
+        help="replace only this model's existing output subtree (default: fail if it exists)",
+    )
+    parser.add_argument(
+        "--allow-remote-api", action="store_true",
+        help="allow a non-loopback model endpoint after institutional privacy/security approval",
+    )
+    parser.add_argument(
+        "--acknowledge-phi-risk", action="store_true",
+        help="required with --retain-raw-content; confirms approved controlled storage",
+    )
     return parser
 
 
@@ -257,6 +400,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         segment_size=args.segment_size, overlap=args.overlap,
         model_config=args.model_config, strip_content=args.strip_raw_content,
         request_timeout=args.request_timeout,
+        overwrite_model_output=args.overwrite_model_output,
+        allow_remote_api=args.allow_remote_api,
+        acknowledge_phi_risk=args.acknowledge_phi_risk,
     )
     print(f"wrote artifacts under {model_dir}")
     return 0

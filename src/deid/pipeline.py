@@ -414,10 +414,11 @@ def redacted_representation_with_map(source: str, regions: Sequence[tuple[int, i
 
 
 def resolved_predictions_document(document_id: str, source: str, predictions: Sequence[Prediction]) -> dict[str, Any]:
-    """Assemble the PHI-free ``resolved_predictions.json`` payload for one note.
+    """Assemble a literal-text-free ``resolved_predictions.json`` payload.
 
     This is the artifact the scorer consumes: offsets and types only, never the
-    identifier text.
+    identifier text. Document identifiers and source hashes can nevertheless be
+    sensitive linkage data and should remain in controlled storage.
     """
     return {
         "schema_version": PREDICTIONS_SCHEMA_VERSION,

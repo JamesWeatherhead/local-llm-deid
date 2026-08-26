@@ -7,7 +7,9 @@ The scorer reads only two things per note:
 
 From those it recomputes character-, span-, note-, and reliability-level metrics
 under formulas defined here, and writes one long-format table plus supporting
-manifests. All outputs are PHI-free: offsets, counts, and rates only.
+manifests. Outputs contain no clinical text, but document identifiers, source
+hashes, and local provenance may still be sensitive and require controlled
+storage when real clinical data are scored.
 
 Coordinate system: Unicode codepoints, half-open ``[start, end)``. The gold
 ``text`` is the reference; Python ``str`` indexing is codepoint-based.
@@ -22,14 +24,22 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import os
 import platform
 import re
 import statistics
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
 from . import __version__
+from .pipeline import CANONICAL_TYPES, PREDICTIONS_SCHEMA_VERSION
+
+
+class PredictionArtifactError(ValueError):
+    """Raised when a resolved-prediction artifact fails integrity validation."""
 
 
 # --- bitmask helpers ---------------------------------------------------------
@@ -99,7 +109,9 @@ def load_gold(gold_path: Path) -> dict[str, Any]:
     ``id``).
     """
     doc = json.loads(gold_path.read_text(encoding="utf-8"))
-    text = doc.get("text", "")
+    text = doc.get("text")
+    if not isinstance(text, str):
+        raise ValueError(f"gold artifact must contain string text: {gold_path}")
     length = len(text)
 
     type_of = {
@@ -122,15 +134,25 @@ def load_gold(gold_path: Path) -> dict[str, Any]:
         type_mask[code] = type_mask.get(code, 0) | mask
         spans.append((start, end, code))
 
-    return {"length": length, "all": all_mask, "type": type_mask, "spans": spans}
+    return {
+        "length": length,
+        "source_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "all": all_mask,
+        "type": type_mask,
+        "spans": spans,
+    }
 
 
-def load_predictions(model_dir: Path, doc_id: str, pass_number: int) -> Optional[list[tuple[int, int, str]]]:
+def load_predictions(model_dir: Path, doc_id: str, pass_number: int,
+                     expected_source_sha256: str,
+                     source_length: int) -> Optional[list[tuple[int, int, str]]]:
     """Load ``(start, end, type)`` predictions for one note and pass.
 
     Returns ``None`` when the file is absent -- the caller treats a missing
     output as an empty prediction set (a full miss), so non-production is
-    penalised rather than silently skipped.
+    penalised rather than silently skipped. A present but malformed or
+    mismatched artifact raises :class:`PredictionArtifactError`; corrupt output
+    must never be silently converted into a scientific result.
     """
     if pass_number == 1:
         path = model_dir / "resolved" / doc_id / "resolved_predictions.json"
@@ -140,14 +162,54 @@ def load_predictions(model_dir: Path, doc_id: str, pass_number: int) -> Optional
         return None
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
-        return None
+    except (OSError, ValueError) as exc:
+        raise PredictionArtifactError(f"invalid prediction JSON: {path}") from exc
+
+    required_keys = {
+        "schema_version", "document_id", "source_sha256", "offset_unit",
+        "contains_literal_text", "predictions",
+    }
+    if not isinstance(doc, dict) or set(doc) != required_keys:
+        raise PredictionArtifactError(f"invalid prediction artifact schema: {path}")
+    if doc.get("schema_version") != PREDICTIONS_SCHEMA_VERSION:
+        raise PredictionArtifactError(f"prediction schema version mismatch: {path}")
+    if doc.get("document_id") != doc_id:
+        raise PredictionArtifactError(f"prediction document id mismatch for {doc_id}: {path}")
+    if doc.get("source_sha256") != expected_source_sha256:
+        raise PredictionArtifactError(f"prediction source hash mismatch for {doc_id}: {path}")
+    if doc.get("offset_unit") != "Unicode codepoint; half-open [start,end)":
+        raise PredictionArtifactError(f"prediction offset unit mismatch for {doc_id}: {path}")
+    if doc.get("contains_literal_text") is not False:
+        raise PredictionArtifactError(f"prediction artifact may contain literal text: {path}")
+    if not isinstance(doc.get("predictions"), list):
+        raise PredictionArtifactError(f"predictions must be a list: {path}")
 
     predictions: list[tuple[int, int, str]] = []
-    for pred in doc.get("predictions", []):
-        start, end, identifier_type = pred.get("start"), pred.get("end"), pred.get("identifier_type", "")
-        if isinstance(start, int) and isinstance(end, int):
-            predictions.append((start, end, identifier_type))
+    seen: set[tuple[int, int, str]] = set()
+    for index, pred in enumerate(doc["predictions"]):
+        if not isinstance(pred, dict) or set(pred) != {"start", "end", "identifier_type"}:
+            raise PredictionArtifactError(
+                f"invalid prediction item {index} for {doc_id}: {path}"
+            )
+        start, end = pred["start"], pred["end"]
+        identifier_type = pred["identifier_type"]
+        if type(start) is not int or type(end) is not int:
+            raise PredictionArtifactError(
+                f"prediction offsets must be integers for {doc_id}: {path}"
+            )
+        if not (0 <= start < end <= source_length):
+            raise PredictionArtifactError(
+                f"prediction offsets out of bounds for {doc_id}: {path}"
+            )
+        if identifier_type not in CANONICAL_TYPES:
+            raise PredictionArtifactError(
+                f"invalid prediction identifier type for {doc_id}: {path}"
+            )
+        item = (start, end, identifier_type)
+        if item in seen:
+            raise PredictionArtifactError(f"duplicate prediction for {doc_id}: {path}")
+        seen.add(item)
+        predictions.append(item)
     return predictions
 
 
@@ -169,12 +231,17 @@ def doc_operations(base_dir: Path, doc_id: str, pass_number: int) -> dict[str, A
         except ValueError:
             continue
         segments += 1
-        choice = (envelope.get("choices") or [{}])[0]
+        choices = envelope.get("choices") if isinstance(envelope, dict) else None
+        choice = choices[0] if (isinstance(choices, list) and choices
+                                and isinstance(choices[0], dict)) else {}
         if choice.get("finish_reason") == "stop":
             stop += 1
-        usage = envelope.get("usage") or {}
-        prompt_tokens += usage.get("prompt_tokens", 0) or 0
-        completion_tokens += usage.get("completion_tokens", 0) or 0
+        usage_value = envelope.get("usage") if isinstance(envelope, dict) else None
+        usage = usage_value if isinstance(usage_value, dict) else {}
+        prompt_value = usage.get("prompt_tokens")
+        completion_value = usage.get("completion_tokens")
+        prompt_tokens += prompt_value if type(prompt_value) is int else 0
+        completion_tokens += completion_value if type(completion_value) is int else 0
 
     usable = valid = validated_seen = 0
     val_dir = base_dir / "validation" / doc_id
@@ -195,7 +262,8 @@ def doc_operations(base_dir: Path, doc_id: str, pass_number: int) -> dict[str, A
     complete = segments > 0 and stop == segments and (usable == segments if have_validation else True)
     return {
         "segments": segments, "stop": stop, "usable": usable, "valid": valid,
-        "have_validation": have_validation, "prompt_tokens": prompt_tokens,
+        "have_validation": have_validation, "validation_records": validated_seen,
+        "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens, "complete": complete,
     }
 
@@ -316,7 +384,9 @@ def aggregate(doc_records: list[tuple[str, dict[str, Any], dict[str, Any]]]) -> 
             agg["prompt_tokens"] += ops["prompt_tokens"]
             agg["completion_tokens"] += ops["completion_tokens"]
             if ops["have_validation"]:
-                agg["val_requests"] += ops["segments"]
+                # Usability and strict-validity rates are conditional on the
+                # validation records that actually exist, not on raw requests.
+                agg["val_requests"] += ops["validation_records"]
                 agg["usable"] += ops["usable"]
                 agg["valid"] += ops["valid"]
 
@@ -351,7 +421,7 @@ def aggregate(doc_records: list[tuple[str, dict[str, Any], dict[str, Any]]]) -> 
 
 COLUMNS = [
     "model_id", "hf_link", "hf_gguf_repo", "developer", "family",
-    "params_total_B", "params_active_B", "moe", "is_medical", "is_reasoning",
+    "params_total_B", "params_effective_B", "params_active_B", "moe", "is_medical", "is_reasoning",
     "quant", "n_docs", "doc_provenance",
     "pass", "surface", "cohort", "phi_type",
     "n_notes", "doc_chars_total", "gt_phi_chars", "pred_phi_chars",
@@ -459,22 +529,49 @@ def emit_rows(meta: dict[str, Any], pass_label: str, cohort: str, agg: dict[str,
 # --- model discovery + metadata ---------------------------------------------
 
 def discover_models(pred_dir: Path) -> list[str]:
-    """Every immediate subdirectory of ``pred_dir`` that holds a ``resolved/`` tree."""
+    """Every immediate subdirectory of ``pred_dir`` (one attempted model run)."""
     return sorted(
         entry.name for entry in pred_dir.iterdir()
-        if entry.is_dir() and (entry / "resolved").is_dir()
+        if entry.is_dir()
     )
 
 
-def list_documents(model_dir: Path) -> list[str]:
-    """Document ids this model produced Pass-1 output for."""
-    resolved = model_dir / "resolved"
+def list_documents(model_dir: Path, pass_number: int = 1) -> list[str]:
+    """Document ids for which this model has a resolved artifact for one pass."""
+    resolved = (model_dir / "resolved" if pass_number == 1
+                else model_dir / "pass_2" / "resolved")
     if not resolved.is_dir():
         return []
     return sorted(
         entry.name for entry in resolved.iterdir()
         if entry.is_dir() and (entry / "resolved_predictions.json").exists()
     )
+
+
+def output_documents(model_dir: Path) -> set[str]:
+    """All document ids represented anywhere in a model's output subtrees."""
+    doc_ids: set[str] = set()
+    for relative in (
+        Path("resolved"), Path("raw_responses"), Path("validation"),
+        Path("pass_2/resolved"), Path("pass_2/raw_responses"), Path("pass_2/validation"),
+    ):
+        subtree = model_dir / relative
+        if subtree.is_dir():
+            doc_ids.update(entry.name for entry in subtree.iterdir() if entry.is_dir())
+    return doc_ids
+
+
+def expected_documents(gold_dir: Path) -> list[str]:
+    """Document ids defined by the locked gold set, which drives scoring scope."""
+    if not gold_dir.is_dir():
+        raise FileNotFoundError(f"gold directory not found: {gold_dir}")
+    files = sorted(gold_dir.glob("*.json"))
+    if not files:
+        raise FileNotFoundError(f"no gold JSON files found in {gold_dir}")
+    doc_ids = [path.stem for path in files]
+    if len(doc_ids) != len(set(doc_ids)):
+        raise ValueError(f"duplicate gold document ids in {gold_dir}")
+    return doc_ids
 
 
 def load_config(model_dir: Path) -> dict[str, Any]:
@@ -489,7 +586,9 @@ def load_config(model_dir: Path) -> dict[str, Any]:
     repo = config.get("hf_gguf_repo", "") or ""
     return {
         "developer": config.get("developer", ""), "family": config.get("family", ""),
-        "params_total_B": config.get("params_total_B"), "params_active_B": config.get("params_active_B"),
+        "params_total_B": config.get("params_total_B"),
+        "params_effective_B": config.get("params_effective_B"),
+        "params_active_B": config.get("params_active_B"),
         "moe": config.get("moe"), "is_medical": config.get("is_medical"),
         "is_reasoning": config.get("reasoning"), "quant": config.get("quant_target", ""),
         "hf_gguf_repo": repo, "hf_link": f"https://huggingface.co/{repo}" if repo else "",
@@ -501,6 +600,8 @@ def load_config(model_dir: Path) -> dict[str, Any]:
 def score_all(pred_dir: Path, gold_dir: Path) -> dict[str, list[dict[str, Any]]]:
     """Score every model under ``pred_dir`` against gold in ``gold_dir``."""
     gold_cache: dict[str, dict[str, Any]] = {}
+    docs = expected_documents(gold_dir)
+    expected_doc_set = set(docs)
 
     def gold_for(doc_id: str) -> dict[str, Any]:
         if doc_id not in gold_cache:
@@ -514,12 +615,19 @@ def score_all(pred_dir: Path, gold_dir: Path) -> dict[str, list[dict[str, Any]]]
     for model_id in discover_models(pred_dir):
         model_dir = pred_dir / model_id
         config = load_config(model_dir)
-        docs = list_documents(model_dir)
+        extra_docs = output_documents(model_dir) - expected_doc_set
+        if extra_docs:
+            raise ValueError(
+                f"prediction outputs without matching gold for model {model_id}: "
+                + ", ".join(sorted(extra_docs))
+            )
         meta = {
             "model_id": model_id, "n_docs": len(docs), "doc_provenance": "",
             "hf_link": config["hf_link"], "hf_gguf_repo": config["hf_gguf_repo"],
             "developer": config["developer"], "family": config["family"],
-            "params_total_B": config["params_total_B"], "params_active_B": config["params_active_B"],
+            "params_total_B": config["params_total_B"],
+            "params_effective_B": config["params_effective_B"],
+            "params_active_B": config["params_active_B"],
             "moe": config["moe"], "is_medical": config["is_medical"],
             "is_reasoning": config["is_reasoning"], "quant": config["quant"],
         }
@@ -532,7 +640,11 @@ def score_all(pred_dir: Path, gold_dir: Path) -> dict[str, list[dict[str, Any]]]
             for doc_id in docs:
                 gold = gold_for(doc_id)
                 gold_types |= set(gold["type"].keys())
-                predictions = load_predictions(model_dir, doc_id, pass_number)
+                predictions = load_predictions(
+                    model_dir, doc_id, pass_number,
+                    expected_source_sha256=gold["source_sha256"],
+                    source_length=gold["length"],
+                )
                 if predictions is None:
                     predictions = []
                 score = score_document(gold, predictions)
@@ -565,14 +677,28 @@ def score_all(pred_dir: Path, gold_dir: Path) -> dict[str, list[dict[str, Any]]]
 
 
 def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:
-    with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+        os.replace(temporary_path, path)
+        path.chmod(0o600)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
 
 
 def write_outputs(out_dir: Path, gold_dir: Path, results: dict[str, list[dict[str, Any]]]) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if out_dir.is_symlink():
+        raise ValueError(f"refusing symlinked output directory: {out_dir}")
+    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    out_dir.chmod(0o700)
     write_csv(out_dir / "metrics_long.csv", COLUMNS, results["metrics"])
     per_doc_columns = [
         "model_id", "n_docs", "doc", "pass_", "doc_chars", "gt_phi_chars", "pred_phi_chars",
@@ -582,16 +708,17 @@ def write_outputs(out_dir: Path, gold_dir: Path, results: dict[str, list[dict[st
     write_csv(out_dir / "per_doc_long.csv", per_doc_columns, results["per_doc"])
     manifest_columns = [
         "model_id", "n_docs", "doc_provenance", "hf_link", "hf_gguf_repo", "developer", "family",
-        "params_total_B", "params_active_B", "moe", "is_medical", "is_reasoning", "quant",
+        "params_total_B", "params_effective_B", "params_active_B", "moe", "is_medical", "is_reasoning", "quant",
         "gold_types_present", "model_dir",
     ]
     write_csv(out_dir / "model_manifest.csv", manifest_columns, results["manifest"])
 
-    (out_dir / "run_manifest.json").write_text(json.dumps({
+    manifest_path = out_dir / "run_manifest.json"
+    manifest_text = json.dumps({
         "code_version": __version__,
         "python_version": platform.python_version(),
         "platform": platform.platform(),
-        "gold_source": str(gold_dir),
+        "gold_source": gold_dir.name,
         "offset_unit": "Unicode codepoint; half-open [start,end)",
         "reference_text": "gold PubAnnotation `text`",
         "models": [row["model_id"] for row in results["manifest"]],
@@ -612,7 +739,20 @@ def write_outputs(out_dir: Path, gold_dir: Path, results: dict[str, list[dict[st
         "n_cols_metrics_long": len(COLUMNS),
         "n_rows_metrics_long": len(results["metrics"]),
         "n_rows_per_doc": len(results["per_doc"]),
-    }, indent=2) + "\n", encoding="utf-8")
+    }, indent=2) + "\n"
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{manifest_path.name}.", suffix=".tmp", dir=out_dir, text=True
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(manifest_text)
+        os.replace(temporary_path, manifest_path)
+        manifest_path.chmod(0o600)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
 
 
 def build_parser() -> argparse.ArgumentParser:

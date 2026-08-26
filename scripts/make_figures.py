@@ -17,8 +17,10 @@ For each figure this writes two files into the output directory:
 The figures use the same view the paper reports: the cumulative two-pass
 predictions over every expected note (``pass == cumulative_pass2``,
 ``cohort == all_expected``, note-wide ``phi_type == ALL``), with models ordered
-by character recall. ``figure5`` also reads the ``pass1`` rows to show the
-second-pass gain, and ``figure6`` reads the per-category rows.
+by character recall. Supply ``--metrics`` once per execution to reproduce the
+three-run means; files are key-matched and numeric outcomes averaged before
+plotting. ``figure5`` also reads the ``pass1`` rows to show the second-pass gain,
+and ``figure6`` reads the per-category rows.
 
     python scripts/make_figures.py --metrics out/metrics_long.csv --out-dir out/figures
 
@@ -30,8 +32,11 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 from pathlib import Path
 from typing import Optional
+
+from metric_runs import load_averaged_metrics
 
 # A small, print-safe palette (colour-blind friendly, ASCII hex only).
 PALETTE = ["#4C78A8", "#F58518", "#54A24B", "#E45756",
@@ -272,8 +277,8 @@ def build_figure3(rows, order, title):
     points = [(num(p2[m], "over_redaction_rate"), num(p2[m], "char_recall"), m)
               for m in order if m in p2]
     svg = scatter_svg(title, points,
-                      "over-redaction rate (non-PHI characters removed)",
-                      "char recall (PHI removed)")
+                      "share of redacted characters outside reference spans",
+                      "character recall (reference-identifier removal)")
     return fields, data, svg
 
 
@@ -331,7 +336,7 @@ def build_figure6(rows, order, title):
 
 FIGURES = [
     ("figure2", "PHI removed and notes fully cleaned", build_figure2),
-    ("figure3", "PHI removed vs non-PHI removed", build_figure3),
+    ("figure3", "Reference-identifier removal vs over-redaction", build_figure3),
     ("figure4", "Span coverage and boundary agreement", build_figure4),
     ("figure5", "Second-pass gain in PHI removed", build_figure5),
     ("figure6", "PHI removed by identifier category", build_figure6),
@@ -344,32 +349,44 @@ def write_csv(path: Path, fields: list[str], rows: list[dict[str, str]]) -> None
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+    path.chmod(0o600)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--metrics", type=Path, default=Path("out/metrics_long.csv"),
-                        help="path to metrics_long.csv (default: out/metrics_long.csv)")
+    parser.add_argument("--metrics", type=Path, action="append", default=None,
+                        help="metrics_long.csv for one execution; repeat for all three study executions")
     parser.add_argument("--out-dir", type=Path, default=Path("out/figures"),
                         help="directory for the generated figures (default: out/figures)")
     args = parser.parse_args(argv)
 
-    with args.metrics.open(encoding="utf-8") as stream:
-        rows = list(csv.DictReader(stream))
-    if not rows:
-        parser.error(f"no rows in {args.metrics}")
+    metrics_paths = args.metrics or [Path("out/metrics_long.csv")]
+    for metrics_path in metrics_paths:
+        if not metrics_path.exists():
+            parser.error(f"metrics file not found: {metrics_path}")
+    try:
+        rows = load_averaged_metrics(metrics_paths)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     order = model_order(rows)
     if not order:
-        parser.error(f"no cumulative_pass2 / all_expected / ALL rows in {args.metrics}")
+        parser.error("no cumulative_pass2 / all_expected / ALL rows")
 
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"{len(order)} model(s), ranked by character recall: {', '.join(order)}")
+    if args.out_dir.is_symlink():
+        parser.error(f"refusing symlinked output directory: {args.out_dir}")
+    args.out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    args.out_dir.chmod(0o700)
+    print(f"{len(order)} model(s), {len(metrics_paths)} execution(s), "
+          f"ranked by character recall: {', '.join(order)}")
     print(f"writing figures -> {args.out_dir}")
     for stem, title, builder in FIGURES:
         fields, data, svg = builder(rows, order, title)
         write_csv(args.out_dir / f"{stem}.csv", fields, data)
-        (args.out_dir / f"{stem}.svg").write_text(svg, encoding="utf-8")
+        svg_path = args.out_dir / f"{stem}.svg"
+        svg_path.write_text(svg, encoding="utf-8")
+        svg_path.chmod(0o600)
         print(f"  {stem}.svg   {stem}.csv   ({len(data)} rows)")
     return 0
 

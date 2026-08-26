@@ -28,7 +28,10 @@ from pathlib import Path
 # manuscript's results table. The fields are exactly those consumed by
 # deid.metrics.load_config, plus size_gb -- the on-disk checkpoint size from the
 # manuscript's checkpoint table, recorded here for provenance (the scorer does
-# not read it). params_active_B is null unless the model is an MoE.
+# not read it). ``params_effective_B`` is used for Gemma-4 E2B/E4B, whose
+# developer model card distinguishes total parameters including per-layer
+# embeddings from the smaller effective parameter count. ``params_active_B`` is
+# used only for mixture-of-experts models.
 #
 # hf_gguf_repo points at the resolving, runnable GGUF repository the study used to
 # obtain the quant named in quant_target. For three models the manuscript's
@@ -59,7 +62,8 @@ MODELS = {
         "hf_gguf_repo": "unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF",
     },
     "gemma-4-E4B-it": {
-        "developer": "Google", "family": "Gemma-4", "params_total_B": 4.5,
+        "developer": "Google", "family": "Gemma-4", "params_total_B": 8.0,
+        "params_effective_B": 4.5,
         "params_active_B": None, "moe": False, "is_medical": False,
         "reasoning": False, "quant_target": "Q8_0", "size_gb": 8.19,
         "hf_gguf_repo": "unsloth/gemma-4-E4B-it-GGUF",
@@ -77,10 +81,13 @@ MODELS = {
         "hf_gguf_repo": "unsloth/Ministral-3-14B-Instruct-2512-GGUF",
     },
     "gemma-4-E2B-it": {
-        "developer": "Google", "family": "Gemma-4", "params_total_B": 2.3,
+        "developer": "Google", "family": "Gemma-4", "params_total_B": 5.1,
+        "params_effective_B": 2.3,
         "params_active_B": None, "moe": False, "is_medical": False,
         "reasoning": False, "quant_target": "BF16", "size_gb": 9.31,
-        "hf_gguf_repo": "google/gemma-4-E2B-it",
+        "hf_gguf_repo": "ggml-org/gemma-4-E2B-it-GGUF",
+        "checkpoint_file": "gemma-4-E2B-it-BF16.gguf",
+        "checkpoint_sha256": "246c5fb19e64b941b531e86639f070bc67b00f20e9ec8556a6c02653321bc65d",
     },
     "gemma-3-27b-it": {
         "developer": "Google", "family": "Gemma-3", "params_total_B": 27.0,
