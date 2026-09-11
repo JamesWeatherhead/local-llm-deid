@@ -707,9 +707,9 @@ These three files are the complete protocol loaded by `run_model.load_protocol`.
 
 ## Data availability
 
-The datasets analyzed in the study are not publicly available. They consist of real clinical discharge notes and expert gold annotations containing protected health information, collected under UTMB IRB `26-0014`.
+The source clinical notes, independent and consensus annotation exports, and raw model responses are not publicly available because they contain or reproduce protected health information and are governed by University of Texas Medical Branch (UTMB) Institutional Review Board (IRB) protocol 26-0014 and institutional privacy restrictions. Researchers may request access to the same study data for a proposed research project. Access requires completion of the applicable UTMB IRB review and institutional data-access processes, including approval of the proposed use, satisfaction of applicable HIPAA authorization or waiver requirements, and execution of any required institutional agreements. Access is subject to the scope and conditions approved by UTMB and cannot be authorized by the authors alone. Requests should be directed to James Weatherhead (jacweath@utmb.edu), who can provide information about initiating the UTMB review process.
 
-The clinical notes and gold annotations cannot be shared through this repository.
+Aggregate results and nonidentifying methodological details are provided in the article and Supplementary Material. The restricted clinical data are not distributed through this repository. The repository provides a reviewed reference implementation and a synthetic fixture with a rule-based mock model for methodological inspection and offline execution; these public materials do not independently reproduce the published numerical results.
 
 ## Relationship to the study code
 
