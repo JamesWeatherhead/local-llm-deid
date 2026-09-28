@@ -1,72 +1,50 @@
 # Synthetic fixture
 
-Everything in this directory is **synthetic**. The three notes are short,
-discharge-style documents written for this repository, and every identifier in
-them is invented. They contain no real patient data and are not derived from the
-study corpus. Their only purpose is to let the pipeline and scorer run
-end-to-end offline: no GPU, no model weights, no PHI.
+The three short discharge-style notes in this directory were written for the
+repository. All identifiers are invented; the notes are not derived from the
+study corpus. They provide an execution example, not a clinical benchmark.
 
-## Contents
+## Files
 
-- `notes/TEST001.txt`, `TEST002.txt`, `TEST003.txt`: the synthetic notes.
-- `gold/TEST00N.json`: gold annotations in the same PubAnnotation shape as the
-  study gold (reference `text`, typed character `denotations`, `identifier_type`
-  attributes).
-- `name_gazetteer.txt`: the invented names, passed to the offline test stub
-  so it can match names (a pattern stub cannot recognise arbitrary names; a
-  real language model needs no such list).
-- `build_gold.py`: regenerates the gold files from the notes.
-
-## Regenerating the gold
-
-The gold files are checked in, but you can rebuild them from the notes and the
-annotation list at the top of `build_gold.py`:
+`notes/` contains `TEST001.txt`, `TEST002.txt`, and `TEST003.txt`. `gold/` contains
+reference annotations in the PubAnnotation format: source `text`, typed
+`denotations`, and `identifier_type` attributes. `name_gazetteer.txt` lists the
+invented names recognized by the offline stub. `build_gold.py` rebuilds the
+reference files from the notes and its explicit annotation list:
 
 ```bash
 python3 fixtures/synthetic/build_gold.py
 ```
 
-It annotates every occurrence of each listed literal, so if you edit a note,
-keep each identifier intact on a single line.
+The builder annotates every occurrence of each listed literal. Keep the
+annotation list and note text consistent when editing this fixture.
 
-## What the notes are designed to exercise
+## Expected offline result
 
-The fixture is deliberately uneven so a run produces a non-trivial score:
+There are 26 reference spans containing 335 characters. TEST001 and TEST003
+include facility and city names; TEST002 contains only categories targeted by
+the stub. Each note fits into one default segment, so this fixture does not
+exercise overlap. Use [the long example](../long_synthetic/README.md) for that.
 
-- **TEST001** and **TEST003** each name a facility and a city
-  (`02_GEOGRAPHIC_SUBDIVISION`) in addition to the usual names, dates, ages,
-  phone, email, and MRN.
-- **TEST002** contains only identifiers the offline test stub can catch, so it
-  comes out completely clean under the stub, a worked example of a
-  zero-residual note.
+The `StubExtractor` matches names from the gazetteer, dates, ages over 89,
+telephone numbers, email addresses, and MRNs. It does not target geography.
 
-Across the three notes the gold has 26 PHI spans / 335 PHI characters.
-
-## Expected result under the offline test stub
-
-The offline `StubExtractor` targets names (from the gazetteer), dates, ages over
-89, phone numbers, email addresses, and MRNs, but **not** geographic
-subdivisions. Running the stub pipeline and scoring it against this gold gives a
-fixed, hand-checkable result:
-
-| Metric (cumulative pass 2, all notes) | Value |
+| Metric, cumulative Pass 2, all three notes | Value |
 | --- | --- |
-| Character recall | 0.755 (253 / 335) |
-| Character precision | 1.000 (the stub only emits grounded literals) |
-| Residual PHI characters | 82 (every one geographic) |
-| Zero-residual notes | 1 of 3 (TEST002) |
+| Character recall | 253/335, approximately 0.755 |
+| Character precision | 1.000 on this fixture |
+| Remaining annotated identifier characters | 82, all geographic |
+| Notes with no remaining annotated identifier characters | 1 of 3, TEST002 |
 
-The 82 leaked characters are exactly the facility and city names the stub does
-not target, which is why per-type recall is 1.0 for every category it *does*
-target and 0.0 for `02_GEOGRAPHIC_SUBDIVISION`. These values are asserted in
-`tests/test_end_to_end.py`.
-
-To reproduce:
+Category-specific recall is 1.0 for each targeted category and 0.0 for geography.
+`tests/test_end_to_end.py` checks these values. Precision is not guaranteed by
+verbatim grounding: the long example shows that a grounded string can also occur
+in a non-identifying context and be over-redacted there.
 
 ```bash
-PYTHONPATH=src python3 -m deid.run_model --model-id offline-stub \
-    --notes-dir fixtures/synthetic/notes --out-dir /tmp/selftest \
-    --protocol-dir protocol --offline-stub --name-file fixtures/synthetic/name_gazetteer.txt
-PYTHONPATH=src python3 -m deid.metrics \
-    --pred-dir /tmp/selftest --gold-dir fixtures/synthetic/gold --out-dir /tmp/selftest_metrics
+make selftest
 ```
+
+For direct Python commands, see [Usage](../../docs/USAGE.md). The stub was not used
+for the manuscript's LLM results, and a note with no remaining reference
+characters is not thereby proven anonymous.

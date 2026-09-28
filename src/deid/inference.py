@@ -3,16 +3,14 @@
 Two interchangeable back-ends produce the same OpenAI-style chat-completion
 envelope, so the runner in :mod:`deid.run_model` treats them identically:
 
-* :class:`LlamaServerClient` -- the evaluated configuration. It sends one
-  segment to a local ``llama-server`` (llama.cpp) OpenAI-compatible endpoint
-  with the frozen decoding settings (greedy, fixed seed, strict JSON schema).
-  This is what produced the results in the manuscript.
+* :class:`LlamaServerClient` sends one segment to a ``llama-server`` endpoint
+  using the study request settings. This is the public reference client, not
+  an archive of the original study execution software.
 
 * :class:`StubExtractor` -- a small, deterministic stub used only to exercise
   the pipeline and scorer offline (no GPU, no model weights, no PHI). It is a
   test harness for continuous integration and quick checks, **not** an evaluated
-  system: every reported result comes from a local language model via
-  :class:`LlamaServerClient`.
+  system and was not used for the manuscript's LLM results.
 
 Both return an envelope shaped like::
 
@@ -32,7 +30,8 @@ import urllib.request
 from typing import Any, Optional
 
 
-# Frozen decoding settings for the evaluated runs (greedy, reproducible).
+# Study request settings. Identical model outputs across runtimes and hardware
+# are not guaranteed by temperature zero and a fixed seed.
 TEMPERATURE = 0
 SEED = 42
 REASONING_EFFORT = "low"

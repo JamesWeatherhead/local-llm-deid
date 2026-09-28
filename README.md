@@ -1,762 +1,149 @@
-<div align="center">
+# Local LLM clinical text de-identification
 
-# Clinical Text De-identification with Locally Deployed Open-Weight LLMs
+Companion software for *Clinical Text De-identification with Locally Deployed Open-Weight Large Language Models: A Real-World Evaluation of Discharge Notes*, by James Weatherhead, Emily Cwiklik, Peter McCaffrey, and George Golovko. Submitted to *Frontiers in Digital Health* on September 11, 2026.
 
-**Companion evaluation and analysis code for**
-*Clinical Text De-identification with Locally Deployed Open-Weight Large Language Models: A Real-World Evaluation of Discharge Notes*
+We evaluated 17 locally deployed open-weight language models on 100 discharge notes. The highest observed character recall was 98.9%, but no model removed every annotated identifier from every note. The highest note-level completeness was 67 of 100 notes. These are results from the study corpus, not the synthetic examples in this repository.
 
-Weatherhead, Cwiklik, McCaffrey, and Golovko
+This repository provides a reference implementation derived from the study software, the extraction prompts and schema, scoring and analysis scripts, and synthetic examples. It is not an archive of the original execution code. The manuscript cites [v1.0.1](https://github.com/JamesWeatherhead/local-llm-deid/tree/v1.0.1), which includes post-study validation, rerun-safety, and privacy changes; the study results were not recomputed with that release. Later changes on `main` are recorded in [CHANGELOG.md](CHANGELOG.md).
 
-Manuscript being submitted to *Frontiers in Digital Health*.
-
-[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python\&logoColor=white)](#requirements)
-[![License: MIT](https://img.shields.io/badge/License-MIT-2ea44f)](LICENSE)
-[![Inference: local](https://img.shields.io/badge/Inference-local--first-6f42c1)](#quickstart)
-[![Fixture: PHI-free](https://img.shields.io/badge/Fixture-PHI--free-0969da)](#repository-scope)
-
-</div>
-
-This repository contains the **evaluation and analysis pipeline** used in the accompanying study. It converts a model's structured output into source-grounded, character-offset redactions and scores those redactions against expert gold annotations.
-
-The code is published to make the computational methods inspectable, testable, and reusable. It is not a one-command reproduction of the published study because the real clinical notes, their gold annotations, and the model weights cannot be distributed with the repository.
-
-> [!IMPORTANT]
-> The study used real, IRB-approved discharge notes containing protected health information. Those notes and their expert annotations are not included. The repository instead ships a small **synthetic, PHI-free fixture** that exercises the same segmentation, inference, grounding, two-pass redaction, and scoring pipeline.
-
-With the included fixture, you can:
-
-* run a real local open-weight model through both redaction passes;
-* reproduce the scorer's complete output schema;
-* rebuild the ranked results table and analysis figures;
-* swap in another evaluated model by changing one model path;
-* run a dependency-free offline self-test with no model, GPU, or network.
-
-## Contents
-
-| Section                                                                             | Purpose                                                                      |
-| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| [Quickstart](#quickstart)                                                           | Run Gemma 3 1B locally over the PHI-free fixture and score the result.       |
-| [Repository scope](#repository-scope)                                               | See what is included and what must be supplied for real-data reproduction.   |
-| [Repository layout](#repository-layout)                                             | Locate the pipeline, protocol, fixtures, scripts, tests, and documentation.  |
-| [How the pipeline works](#how-the-pipeline-works)                                   | Follow segmentation, extraction, grounding, two-pass redaction, and scoring. |
-| [Run another model or corpus](#run-another-model-or-corpus)                         | Change models, use your own notes, or adapt the launcher to other hardware.  |
-| [Reproduce the study on real data](#reproduce-the-study-on-real-data)               | Supply the restricted study inputs and rerun the evaluation.                 |
-| [Prepare gold annotations with INCEpTION](#prepare-gold-annotations-with-inception) | Create gold annotations in the exact format consumed by the scorer.          |
-| [Outputs and PHI handling](#outputs-and-phi-handling)                               | Understand generated files and which artifacts may contain PHI.              |
-| [Models evaluated](#models-evaluated)                                               | Review all 17 evaluated checkpoints and their Hugging Face repositories.     |
-| [Data availability](#data-availability)                                             | Review the restrictions on the clinical corpus and gold annotations.         |
+This is research software, not a validated system for preparing clinical text for release. Predictions can miss identifiers or remove useful text. Agreement with reference annotations does not establish anonymity or preservation of clinical meaning.
 
 ## Requirements
 
-The pipeline, scorer, figure scripts, and tests require **Python 3.9 or newer** and use only the Python standard library.
+The pipeline, scorer, analysis scripts, and tests use Python 3.9 or newer and the standard library. The file-permission controls and shell commands target macOS and Linux; native Windows execution is not tested.
 
-A real model evaluation additionally requires a local [`llama-server`](https://github.com/ggml-org/llama.cpp) instance from `llama.cpp`.
-
-| Component                            | Requirement                                                       |
-| ------------------------------------ | ----------------------------------------------------------------- |
-| Pipeline, scorer, figures, and tests | Python 3.9+; no third-party Python packages                       |
-| Real local inference                 | `llama-server` hosting a compatible GGUF model                    |
-| Quickstart hardware                  | Apple Silicon Mac, M1 or newer, with at least 8 GB unified memory |
-| Quickstart model                     | Gemma 3 1B, Q8_0, 1.07 GB                                         |
-
-The commands below use `python3`, the standard interpreter name on macOS and most Linux distributions. On Windows, the command is usually `python`.
-
-Installation of the Python package is optional. Every example prefixes commands with `PYTHONPATH=src`, so the repository runs directly from a checkout. Alternatively:
-
-```bash
-python3 -m pip install .
-```
-
-This makes the `deid` package importable without the `PYTHONPATH` prefix and installs the `deid-run` and `deid-score` console commands.
-
-For an editable development install, upgrade older packaging tools first and then run `python3 -m pip install -e .`. The stock `pip` bundled with some Python 3.9 installations is too old for this project's `pyproject.toml`-based editable install.
-
-The `make` targets are convenience wrappers around the same Python commands. `make` is not required.
+Local model inference additionally requires a compatible `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp) and GGUF weights. Model downloads require network access and the relevant model license permissions. Inference can run locally after the software and weights are installed.
 
 ## Quickstart
 
-The following four steps clone the repository, install `llama.cpp`, download the smallest model evaluated in the study, run both redaction passes over the three synthetic notes, score the predictions, print the ranked table, and render the result figures.
-
-These commands target **Apple Silicon Macs**. Other platforms use the same pipeline but may require a different `llama.cpp` build or server launch configuration; see [Other hardware](#other-hardware).
-
-### 1. Clone the repository
+Start with the offline example; no model weights or GPU are needed:
 
 ```bash
 git clone https://github.com/JamesWeatherhead/local-llm-deid.git
 cd local-llm-deid
-```
-
-### 2. Install llama.cpp and the Hugging Face CLI
-
-```bash
-brew install llama.cpp
-pip install -U "huggingface_hub[cli]"
-```
-
-### 3. Download Gemma 3 1B
-
-Download the 1.07 GB Q8_0 GGUF into `models/gemma-3-1b-it/`:
-
-```bash
-huggingface-cli download ggml-org/gemma-3-1b-it-GGUF \
-    gemma-3-1b-it-Q8_0.gguf --local-dir models/gemma-3-1b-it
-```
-
-### 4. Run the complete pipeline
-
-```bash
-scripts/run_local_end_to_end.sh \
-    --gguf models/gemma-3-1b-it/gemma-3-1b-it-Q8_0.gguf \
-    --model-id gemma-3-1b-it
-```
-
-The script:
-
-1. starts `llama-server`;
-2. runs Pass 1 and Pass 2 over the synthetic fixture;
-3. scores the predictions against the fixture gold annotations;
-4. prints the ranked results table;
-5. renders the result figures;
-6. stops the server.
-
-On an Apple Silicon laptop, the three-note run finishes in well under a minute and produces character recall of approximately **0.78** at approximately **0.86 precision**.
-
-All generated artifacts are written under `out/`:
-
-```text
-out/
-├─ metrics_long.csv                    every metric, one row per pass × cohort × PHI type
-├─ per_doc_long.csv                    per-note counts used by bootstrap_ci.py
-├─ predictions/
-│  └─ gemma-3-1b-it/                   resolved predictions and validation artifacts
-└─ figures/
-   ├─ figure2.svg ... figure6.svg       generated result figures
-   └─ figure2.csv ... figure6.csv       plotted values for each figure
-
-Exact example paths:
-
-- `out/metrics_long.csv`
-- `out/per_doc_long.csv`
-- `out/predictions/gemma-3-1b-it/`
-- `out/figures/figure2.svg` through `out/figures/figure6.svg`
-```
-
-Because `--model-id gemma-3-1b-it` matches `model_configs/gemma-3-1b-it.json`, the ranked table automatically includes the model's parameter count and Hugging Face link.
-
-Use `--model-config PATH` to override the default metadata file. Persisted raw-response content is stripped by default. `--retain-raw-content --acknowledge-phi-risk` is an explicit two-flag opt-in for controlled environments that need verbatim model responses; those responses may contain PHI.
-
-You may also let the script download the model weights directly:
-
-```bash
-scripts/run_local_end_to_end.sh \
-    --hf-repo ggml-org/gemma-3-1b-it-GGUF \
-    --hf-file gemma-3-1b-it-Q8_0.gguf
-```
-
-Run the following command to see all available flags, including host, port, context size, GPU layers, model metadata, and output directory:
-
-```bash
-scripts/run_local_end_to_end.sh --help
-```
-
-### Optional: bootstrap confidence intervals
-
-Demonstrate the 95% confidence intervals for character recall and note-level completeness from one synthetic run:
-
-```bash
-python3 scripts/bootstrap_ci.py --per-doc out/per_doc_long.csv
-```
-
-The script resamples notes with replacement, recomputes pooled recall and completeness for each draw, and reports the 2.5th and 97.5th percentiles using 10,000 resamples and seed `20260801`.
-
-On the three-note fixture, the interval is only a runnable demonstration. To reproduce the manuscript's three-execution preparation method from restricted outputs, repeat `--per-doc` once for each locked execution; the script verifies matching model/pass/note keys, averages stored counts and completeness indicators by note across executions, and then performs the note-level bootstrap:
-
-```bash
-python3 scripts/bootstrap_ci.py \
-    --per-doc run1/per_doc_long.csv \
-    --per-doc run2/per_doc_long.csv \
-    --per-doc run3/per_doc_long.csv
-```
-
-## Repository scope
-
-### Included in this repository
-
-* The study's segmentation, grounding, resolver, two-pass redaction, and scoring logic as standalone modules under `src/deid/`.
-* The frozen system prompt, user prompt template, and model-output JSON schema under `protocol/`.
-* A three-note synthetic fixture with gold annotations under `fixtures/synthetic/`.
-* A scorer for the reported character-, span-, note-, and reliability-level definitions from gold annotations and resolved predictions.
-* Scripts that rebuild the ranked results table, checkpoint table, corpus table, confidence interval, and analysis figures.
-* Per-model metadata for all evaluated checkpoints under `model_configs/`.
-* A manuscript-to-code map under `docs/MANUSCRIPT_MAP.md`.
-* Offline unit and end-to-end tests under `tests/`.
-
-### Not included
-
-* The real 100-note clinical corpus.
-* The expert gold annotations for the real corpus.
-* Model weights.
-* The manuscript's published figure images.
-
-### Manuscript analyses not reproduced here
-
-A few retained analyses are outside this repository's runnable fixture: the inter-annotator agreement statistics, the Microsoft Presidio baseline, and the per-note timing medians. They depend on restricted independent annotations, a separate third-party system, or raw timing records that are not distributed here. The runner produces one temperature-0 execution at a time; the bootstrap helper accepts the three separate locked executions used as a stability check and performs the manuscript's across-execution averaging before resampling. Each boundary is mapped in [`docs/MANUSCRIPT_MAP.md`](docs/MANUSCRIPT_MAP.md).
-
-> [!NOTE]
-> This is companion evaluation and analysis code, not a bundled clinical dataset and not a turnkey reproduction of the published numerical results.
-
-To reproduce the published results, you must supply:
-
-1. notes and gold annotations in the documented formats;
-2. the GGUF weights for each evaluated model;
-3. a running `llama-server` instance;
-4. the same model and runtime configuration used by the study.
-
-See [Reproduce the study on real data](#reproduce-the-study-on-real-data) for the complete workflow.
-
-## Repository layout
-
-```text
-.
-├─ src/deid/                           pipeline, inference back ends, two-pass runner, and scorer
-│  ├─ pipeline.py                      segmentation, grounding, mapping, and redaction
-│  ├─ inference.py                     llama-server client and offline test stub
-│  ├─ run_model.py                     runs one model over the notes: Pass 1, Pass 2, redact
-│  └─ metrics.py                       re-derives every metric from gold and predictions
-├─ protocol/                           frozen system prompt and model-output JSON schema
-├─ fixtures/synthetic/                 three synthetic notes and gold annotations; PHI-free
-├─ scripts/
-│  ├─ run_local_end_to_end.sh          serve a model, run, score, build table, and render figures
-│  ├─ make_results_table.py            ranked scorer-derived results summary
-│  ├─ make_figures.py                  analysis charts as SVG and CSV
-│  ├─ make_checkpoints_table.py        checkpoint table; manuscript Table 2
-│  ├─ make_corpus_table.py             corpus table; manuscript Table 1
-│  └─ bootstrap_ci.py                  95% confidence interval for PHI removed
-├─ model_configs/                      model metadata: parameters, quantization, size, and repository
-├─ tests/                              offline end-to-end test and pipeline invariants
-├─ docs/
-│  ├─ MANUSCRIPT_MAP.md                maps manuscript artifacts and metrics to exact code paths
-│  └─ images/                          methods figure, workflow figure, and INCEpTION screenshots
-├─ DATA_DICTIONARY.md                  definitions for every metrics_long.csv column
-└─ Makefile                            offline entry points: figures, tables, tests, and all
-```
-
-## How the pipeline works
-
-The implementation follows the manuscript. All deterministic text operations use Unicode codepoints and half-open `[start, end)` offsets relative to the source note.
-
-![Panel B of the study workflow figure (manuscript Figure 1): the evaluation in two branches. In one, two reviewers independently marked PHI in INCEpTION and reconciled their annotations into the reference standard. In the other, each model processed the same discharge note locally: segment into 3,500-character windows with 400-character overlap, Pass 1, redact, segment again, Pass 2, final redaction. The two branches are then compared at the character and span levels. The figure is a schematic and contains no PHI.](docs/images/methods-pipeline.png)
-
-*Panel B of the manuscript's study workflow figure, Figure 1. The calibration-set selection panel is omitted. All displayed text is synthetic.*
-
-### 1. Segmentation
-
-Each note is divided into fixed windows of 3,500 Unicode codepoints with 400 codepoints of overlap. The overlap preserves identifiers that fall near a segment boundary by ensuring they appear intact in a neighboring segment.
-
-Implementation: `pipeline.fixed_segments`
-
-### 2. Structured extraction
-
-Each segment is sent to the model with the frozen system prompt and strict JSON schema. The model returns a list of:
-
-```json
-{
-  "exact_text": "...",
-  "identifier_type": "..."
-}
-```
-
-The identifier types are drawn from the 18 HIPAA Safe Harbor categories. Decoding is greedy and reproducible: temperature `0`, seed `42`, and `reasoning_effort` set to `low`.
-
-Implementation: `src/deid/inference.py`
-
-### 3. Validation and grounding
-
-A returned pair is accepted only when:
-
-* `exact_text` is a non-empty string;
-* the text occurs verbatim in the segment;
-* `identifier_type` is valid.
-
-Every accepted literal is then located at every occurrence in the source note and converted to source offsets. The resolver performs no fuzzy matching and no normalization.
-
-Implementations: `pipeline.validate_response`, `pipeline.resolve_pairs`
-
-### 4. Two-pass detection
-
-Pass 1 runs over the original note.
-
-For Pass 2, the pipeline replaces every Pass-1 region with the neutral marker `[PHI]`, segments the redacted note, and sends those segments through the same extraction protocol. New findings are mapped back to source-note coordinates.
-
-A Pass-2 match is dropped when it crosses a `[PHI]` marker because it cannot map to a single contiguous source span. New Pass-2 findings are applied only when every Pass-2 segment for that note finishes with `stop` and returns a usable structured response.
-
-The cumulative prediction set is:
-
-```text
-Pass 1 predictions ∪ applied Pass 2 predictions
-```
-
-Implementation: `run_model.process_document`
-
-### 5. Redaction
-
-The scored de-identified note replaces each predicted region with `[PHI]`. A category-labeled rendering is also available for inspection.
-
-Implementations: `pipeline.neutral_redaction`, `pipeline.typed_redaction`
-
-### 6. Scoring
-
-The scorer reads only:
-
-* the gold JSON annotations; and
-* each model's `resolved_predictions.json` file.
-
-The resolved predictions contain offsets and types, not identifier text. From these inputs, the scorer recomputes character-, span-, note-, and reliability-level metrics.
-
-The headline PHI-removal metric is **character recall**. It is type-agnostic: a gold PHI character counts as removed when it is covered by any predicted redaction, regardless of the predicted category.
-
-Metrics are reported across:
-
-* two prediction stages: `pass1` and `cumulative_pass2`;
-* two cohorts: `all_expected` and `operational_complete`;
-* every HIPAA Safe Harbor type represented in the data;
-* micro-averaged results by default, with macro variants alongside.
-
-Implementation: `src/deid/metrics.py`
-
-![Supplementary Figure S1: how each discharge note is segmented, redacted, and processed a second time, in three panels. Panel A splits a synthetic note into overlapping 3,500-character segments, where neighbouring segments repeat 400 characters so an identifier near a boundary appears in both. Panel B shows the same local model reviewing each segment and returning the exact identifier text and category as a structured response. Panel C shows the deterministic steps that locate the returned text, merge duplicate or overlapping detections, and redact after Pass 1; the redacted note is then segmented and reviewed again, and Pass-2 detections are mapped back and added to Pass 1 (Pass 2 can add a redaction but never reverse one). All text shown is synthetic and the figure contains no PHI.](docs/images/segment-workflow.png)
-
-*Supplementary Figure S1 from the manuscript. Panel A shows segmentation, Panel B shows local-model extraction, and Panel C shows deterministic reassembly, redaction, and the second pass. All displayed text is synthetic.*
-
-### Change the segmentation window and overlap
-
-The study used a 3,500-codepoint window with 400 codepoints of overlap. These defaults are defined as `SEGMENT_SIZE` and `SEGMENT_OVERLAP` near the top of [`src/deid/pipeline.py`](src/deid/pipeline.py#L74-L80).
-
-The synthetic notes are only a few hundred codepoints long, so each fits within one segment and the overlap is not exercised. Windowing becomes visible on full-length clinical notes.
-
-Override the defaults for a run with `--segment-size` and `--overlap`:
-
-```bash
-PYTHONPATH=src python3 -m deid.run_model \
-    --model-id gemma-3-1b-it \
-    --notes-dir fixtures/synthetic/notes \
-    --out-dir out/predictions \
-    --protocol-dir protocol \
-    --api-base http://127.0.0.1:8081 \
-    --segment-size 3500 \
-    --overlap 400
-```
-
-You may also edit `SEGMENT_SIZE` and `SEGMENT_OVERLAP` directly in `src/deid/pipeline.py`.
-
-## Run another model or corpus
-
-### Use another evaluated model
-
-Any model listed under [Models evaluated](#models-evaluated) can be substituted without changing the pipeline. Download the corresponding GGUF, then change only the `--gguf` path and `--model-id`.
-
-For example, to run Gemma 3 4B:
-
-```bash
-huggingface-cli download unsloth/gemma-3-4b-it-GGUF \
-    gemma-3-4b-it-Q8_0.gguf --local-dir models/gemma-3-4b-it
-
-scripts/run_local_end_to_end.sh \
-    --gguf models/gemma-3-4b-it/gemma-3-4b-it-Q8_0.gguf \
-    --model-id gemma-3-4b-it
-```
-
-Larger models generally require approximately their on-disk size in free memory, plus runtime headroom. Each single `*.gguf` file is a complete model checkpoint. Consult the linked Hugging Face repository for available quantizations and exact filenames.
-
-### Run your own notes
-
-Point the end-to-end script at your notes and gold annotations with `--notes-dir` and `--gold-dir`:
-
-```bash
-scripts/run_local_end_to_end.sh \
-    --gguf models/gemma-3-1b-it/gemma-3-1b-it-Q8_0.gguf \
-    --model-id gemma-3-1b-it \
-    --notes-dir /path/to/notes \
-    --gold-dir /path/to/gold
-```
-
-The required input formats are documented under [Reproduce the study on real data](#reproduce-the-study-on-real-data). Generated text is removed from persisted raw-response artifacts by default without changing any metric. Use `--retain-raw-content --acknowledge-phi-risk` only when the governing protocol explicitly permits retention and the output location has approved access controls.
-
-### Other hardware
-
-The end-to-end script is configured for Apple Silicon. It offloads all model layers to Metal with `--n-gpu-layers 999` and assumes a Homebrew installation of `llama.cpp`.
-
-On other systems:
-
-* **CPU only:** use `--n-gpu-layers 0`; inference will be slower, but no GPU is required.
-* **NVIDIA GPU:** build `llama.cpp` with CUDA support and offload layers to the GPU.
-* **Other accelerators or operating systems:** adapt only the `llama-server` installation and launch flags.
-
-The components chained by the script are platform-independent:
-
-* `llama-server`;
-* `deid.run_model`;
-* `deid.metrics`.
-
-Only the server launch line is hardware-specific. A collaborator comfortable with code can retarget `scripts/run_local_end_to_end.sh` to a specific machine.
-
-## Result figures
-
-`scripts/make_figures.py` converts one or more matched `metrics_long.csv` files into self-contained SVG charts and a CSV containing the plotted values for each chart. Repeat `--metrics` for the three locked executions to average numeric outcomes before plotting; the script rejects mismatched keys or model metadata.
-
-The generated charts cover the analyses presented as manuscript Figures 2 through 6. They use the same metric definitions and the same cumulative two-pass, all-expected-notes view, but they are drawn in this repository's own chart style.
-
-> [!CAUTION]
-> These are not the manuscript's published figure images. The examples below show one model evaluated on the three-note synthetic fixture. The manuscript figures show all 17 models evaluated on the real clinical corpus. The analysis definitions are shared; the appearance and numerical values are not.
-
-Committed example renders are stored under `docs/images/figures/`.
-
-![Repository render of the second-pass gain: character recall after Pass 1 and after the cumulative two-pass run, for Gemma 3 1B on the synthetic fixture. Pass 1 recall is 0.513 and the second pass raises it to 0.779.](docs/images/figures/figure5.svg)
-
-*Second-pass gain for Gemma 3 1B on the synthetic fixture. Character recall increases from 0.513 after Pass 1 to 0.779 after the cumulative two-pass run, a gain of 0.266. This is the repository's rendering of the analysis reported as manuscript Figure 5, not the published figure.*
-
-![Repository render of per-category character recall for Gemma 3 1B on the synthetic fixture (Date 0.571, Name 0.851, Telephone 0.462, Geographic 1.000, Overall 0.779).](docs/images/figures/figure6.svg)
-
-*Character recall by PHI category for Gemma 3 1B on the synthetic fixture: Date 0.571, Name 0.851, Telephone 0.462, Geographic 1.000, and Overall 0.779. This is the repository's rendering of the analysis reported as manuscript Figure 6, not the published figure.*
-
-## Synthetic fixture and offline self-test
-
-Every numerical result reported in the study came from a real local model. The repository also includes a deterministic offline test stub so the entire pipeline can be validated without model weights, a GPU, or a network connection.
-
-The stub is a small pattern matcher used only as test scaffolding. It is not an evaluated de-identification system.
-
-```bash
-make selftest    # run the stub over the fixture, score it, and print the table
-make figures     # render figures from the scored output
-make test        # run the unit and end-to-end suite with python3 -m unittest
-```
-
-The stub targets names from a small gazetteer, dates, ages, telephone numbers, email addresses, and medical record numbers. It deliberately ignores geographic subdivisions.
-
-Its fixed, hand-checkable fixture result is:
-
-* character recall: `0.755`;
-* character precision: `1.0`;
-* completely clean notes: `1` of `3`.
-
-`fixtures/synthetic/README.md` contains the complete per-type breakdown. `tests/test_end_to_end.py` asserts each expected value.
-
-## Reproduce the study on real data
-
-The Quickstart validates the complete workflow on synthetic notes. Reproducing the manuscript's published numerical results requires the original study inputs, none of which are distributed in this repository.
-
-### Required inputs
-
-1. **Clinical notes**
-   A directory of UTF-8 `<doc-id>.txt` files, one note per file.
-
-2. **Gold annotations**
-   One PubAnnotation-format JSON file per note, loaded by `metrics.load_gold`. The exact format is documented under [Prepare gold annotations with INCEpTION](#prepare-gold-annotations-with-inception) and demonstrated under `fixtures/synthetic/gold/`.
-
-3. **Model weights**
-   One GGUF file for each model to be evaluated. The corresponding Hugging Face repositories are listed under [Models evaluated](#models-evaluated).
-
-4. **Local inference server**
-   A [`llama-server`](https://github.com/ggml-org/llama.cpp) instance hosting one model at a time through its OpenAI-compatible endpoint.
-
-### Run one model, then score all models together
-
-```bash
-# Start the server for one model. Adjust flags for your llama.cpp build and hardware.
-llama-server -m gemma-4-31B-it-Q5_K_M.gguf \
-    --port 8081 \
-    --ctx-size 8192
-
-# Run that model over a directory of real <doc-id>.txt notes.
-PYTHONPATH=src python3 -m deid.run_model \
-    --model-id gemma-4-31B-it \
-    --notes-dir /path/to/notes \
-    --out-dir out/predictions \
-    --protocol-dir protocol \
-    --api-base http://127.0.0.1:8081
-
-# Repeat for each model, always using the same out/predictions root, then score all runs.
-PYTHONPATH=src python3 -m deid.metrics \
-    --pred-dir out/predictions \
-    --gold-dir /path/to/gold \
-    --out-dir out
-```
-
-`scripts/run_local_end_to_end.sh` wraps the start-server, run-model, and score sequence for one checkpoint. Pass `--notes-dir` and `--gold-dir` to use the real corpus instead of the fixture.
-
-### Model metadata
-
-Pass a model configuration file so the results include developer, parameter count, architecture, medical specialization, quantization, on-disk size, and the Hugging Face repository:
-
-```bash
---model-config model_configs/<model-id>.json
-```
-
-Ready-made configuration files for every evaluated checkpoint are stored under `model_configs/`. The generation script is `model_configs/build_configs.py`.
-
-The runner copies the selected configuration next to the model's prediction output. The scorer reads the copied configuration when it builds the result manifests and tables. If no model configuration is supplied, the metadata columns remain blank.
-
-### Reliability and determinism
-
-The runner issues every request exactly once. By default it records an allowlisted telemetry projection containing finish reason and token usage, without model-generated text or unknown server fields. The reliability metrics therefore reflect the requests that actually completed. Full response envelopes are retained only with the explicit two-flag PHI-risk acknowledgement described below.
-
-The study evaluated every model with `llama.cpp` on one Apple M4 Max with 48 GB unified memory and Metal acceleration. Inference used temperature `0`, seed `42`, and constrained JSON output. The manuscript reports means across three separate executions under identical locked settings. These were stability executions, not independent experimental samples.
-
-This repository's runner scores one execution at a time. Model-layer determinism can still depend on the exact `llama.cpp` build, server flags, checkpoint bytes, and hardware even at temperature `0`; record and pin those items for any claimed replication. The segmentation, grounding, redaction, and scoring code is deterministic for fixed inputs.
-
-The manuscript's 95% confidence intervals come from resampling notes, not rerunning models. Reproduce them from the three matched per-note outputs with repeated `--per-doc` arguments to `scripts/bootstrap_ci.py`.
-
-## Prepare gold annotations with INCEpTION
-
-The study's reference annotations were created with [INCEpTION](https://inception-project.github.io), an open-source platform for machine-assisted, knowledge-oriented interactive text annotation that can run locally.
-
-To score your own notes, annotate them in INCEpTION and export each completed document in the JSON format consumed by the scorer.
-
-### What you need
-
-* A local INCEpTION instance. Download and setup instructions are available from the [INCEpTION project site](https://inception-project.github.io).
-* Clinical notes as UTF-8 `.txt` files, imported into an INCEpTION project with one document per note.
-* A custom span layer named `PHI_IDENTIFIER`.
-* A layer feature named `identifier_type`.
-* A tagset containing the [18 HIPAA Safe Harbor identifier categories](https://www.luc.edu/its/aboutus/itspoliciesguidelines/hipaainformation/the18hipaaidentifiers/), encoded as `01_NAME`, `02_GEOGRAPHIC_SUBDIVISION`, `03_DATE`, and so forth through category 18.
-
-### Annotate the notes
-
-Open each document, highlight every PHI span, and select its Safe Harbor category from the `identifier_type` field. The study used this same layer and tagset to create the gold reference standard.
-
-![Annotating a document in INCEpTION: each PHI span is highlighted and labelled with its HIPAA Safe Harbor identifier type. The document shown is synthetic; it contains no real PHI.](docs/images/inception-annotate.png)
-
-### Export the annotations
-
-From the INCEpTION toolbar, export each completed document as:
-
-```text
-PubAnnotation Document with Annotations (JSON)
-```
-
-This is the exact structure loaded by the scorer. Complete PHI-free examples are available under `fixtures/synthetic/gold/`.
-
-![Exporting the annotated document from the INCEpTION toolbar, choosing the PubAnnotation Document with Annotations (JSON) format.](docs/images/inception-export.png)
-
-### Expected JSON structure
-
-Each note has one JSON file containing:
-
-* `text`: the source note;
-* `denotations`: PHI spans on the `PHI_IDENTIFIER` layer;
-* `attributes`: the `identifier_type` attached to each span.
-
-Offsets are Unicode codepoints. The interval is half-open: `begin` is inclusive and `end` is exclusive.
-
-An abbreviated example follows. See `fixtures/synthetic/gold/TEST001.json` for a complete file.
-
-```json
-{
-  "sourcedb": "synthetic-fixture",
-  "sourceid": "TEST001",
-  "text": "Discharge Summary\nPatient: John Archer    MRN: AB-102938\n... (full note text) ...",
-  "denotations": [
-    {
-      "id": "T1",
-      "obj": "PHI_IDENTIFIER",
-      "span": { "begin": 27, "end": 38 }
-    },
-    {
-      "id": "T2",
-      "obj": "PHI_IDENTIFIER",
-      "span": { "begin": 47, "end": 56 }
-    }
-  ],
-  "attributes": [
-    {
-      "id": "A1",
-      "subj": "T1",
-      "obj": "01_NAME",
-      "pred": "identifier_type"
-    },
-    {
-      "id": "A2",
-      "subj": "T2",
-      "obj": "09_MEDICAL_RECORD_NUMBER",
-      "pred": "identifier_type"
-    }
-  ]
-}
-```
-
-The scorer loads this structure through `metrics.load_gold`. The `text` field is the reference string to which all offsets apply.
-
-### Cite INCEpTION
-
-When using INCEpTION, cite:
-
-> Klie, J.-C., Bugert, M., Boullosa, B., Eckart de Castilho, R., and Gurevych, I. (2018). The INCEpTION Platform: Machine-Assisted and Knowledge-Oriented Interactive Annotation. In *Proceedings of System Demonstrations of the 27th International Conference on Computational Linguistics (COLING 2018)*, Santa Fe, New Mexico, USA.
-
-## Outputs and PHI handling
-
-### Scorer outputs
-
-The scorer writes four files containing offsets, counts, rates, and run metadata:
-
-| File                 | Contents                                                                                                           |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `metrics_long.csv`   | Main results table; one row per model × pass × cohort × PHI type. Every column is defined in `DATA_DICTIONARY.md`. |
-| `per_doc_long.csv`   | Per-note character counts and reliability fields; input to `scripts/bootstrap_ci.py`.                              |
-| `model_manifest.csv` | Model metadata carried into the scored run.                                                                        |
-| `run_manifest.json`  | Run definitions, coordinate system, and aggregate counts.                                                          |
-
-### Runner outputs
-
-`resolved_predictions.json` and the validation artifacts omit identifier literals, but outputs should still be treated as sensitive: document IDs, source hashes, model IDs, counts, and local provenance can be identifying or confidential in a real clinical workflow.
-
-> [!WARNING]
-> If `--retain-raw-content --acknowledge-phi-risk` is explicitly enabled, `out/predictions/<model>/raw_responses/*.raw.json` stores the model's verbatim response. On real clinical notes, those responses may repeat detected PHI. Treat them as PHI and keep them within the controls required by the governing protocol.
-
-The entire `out/` tree is gitignored. Generated text is blanked as each raw-response artifact is written by default. The Python runner creates protected output roots and per-document directories with mode `0700`, writes output files with mode `0600`, and refuses to reuse a per-model output subtree unless `--overwrite-model-output` is supplied. The shell wrapper additionally sets `umask 077` and accepts only loopback model endpoints. Direct use of the Python runner permits a non-loopback endpoint only when it is HTTPS and `--allow-remote-api` is explicitly acknowledged.
-
-Stripping raw content does not change any metric. The scorer reads only finish reasons and token counts from the raw-response files. `--retain-raw-content --acknowledge-phi-risk` deliberately reverses this safe default and may persist PHI.
-
-## Rebuild manuscript tables and analyses
-
-Small standalone scripts reconstruct the manuscript's tables and analyses from repository artifacts. Each script runs against the synthetic fixture and can be pointed at the restricted real-data outputs when those inputs are available.
-
-`docs/MANUSCRIPT_MAP.md` maps every manuscript table, figure, and metric to the exact code path, output column, and constant that produces it.
-
-| Manuscript artifact                    | Command                                                                                | Required input                                                                                |
-| -------------------------------------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Table 1: corpus and reference standard | `python3 scripts/make_corpus_table.py --gold-dir GOLD`                                 | A directory of gold JSON files. The fixture ships one; the real corpus is IRB-restricted.     |
-| Table 2: model checkpoints             | `python3 scripts/make_checkpoints_table.py`                                            | No external input; reads `model_configs/`.                                                    |
-| Table 3: scorer-derived result fields  | `python3 scripts/make_results_table.py --metrics RUN1 --metrics RUN2 --metrics RUN3`    | Matched scorer outputs; numeric results are averaged across the three executions. Timing and published confidence limits require their corresponding restricted inputs. |
-| 95% CIs for recall and completeness    | `python3 scripts/bootstrap_ci.py --per-doc RUN1 --per-doc RUN2 --per-doc RUN3`          | Matched per-note scorer outputs from the three locked executions.                             |
-| Analyses behind Figures 2-6            | `python3 scripts/make_figures.py --metrics RUN1 --metrics RUN2 --metrics RUN3 --out-dir out/figures` | Matched scorer outputs; writes three-run-mean repository-specific SVG and CSV files.          |
-
-Table 2 is reproduced directly from the committed model configurations. Table 1 is recomputed from whichever gold directory is supplied. The ranked result script reconstructs the scorer-derived Table 3 fields; the manuscript's timing column is not produced by this scorer, and its published confidence limits require the three restricted per-note outputs. Figure analyses are generated from scorer output.
-
-The Quickstart creates valid fixture outputs for all of these scripts. Reproducing the manuscript's published values requires the real notes, real gold annotations, and model weights.
-
-Run the complete offline chain with:
-
-```bash
-make all
-```
-
-Equivalent individual targets are:
-
-```bash
 make selftest
-make figures
-make tables
-make ci
-```
-
-## Corpus and reference standard
-
-The study evaluated 100 discharge notes under an IRB-approved protocol, UTMB IRB `26-0014`.
-
-A separate 20-note calibration set was used only to select and lock the protocol. Those calibration notes are not part of the reported evaluation results.
-
-Two reviewers independently annotated PHI in INCEpTION and reconciled their annotations into one reference standard containing 3,537 spans. Nine of the 18 HIPAA Safe Harbor identifier categories appear in that reference standard. Dates and names are the most frequent categories; the remaining represented categories are sparse.
-
-Neither the real corpus nor its gold annotations are included in this repository. The synthetic fixture is provided in their place for pipeline validation and demonstration.
-
-## Models evaluated
-
-Seventeen open-weight models were evaluated over the same 100 notes in two passes:
-
-```text
-17 models × 100 notes × 2 passes × 3 locked executions = 10,200 pass-by-note evaluations
-```
-
-The table is ordered by cumulative two-pass character recall as reported in the manuscript.
-
-| Model             | Developer  |        Params (B) | Arch. | Medical | Quant     | Size (GB) | Weights on Hugging Face                                                                                                       |
-| ----------------- | ---------- | ----------------: | ----- | :-----: | --------- | --------: | ----------------------------------------------------------------------------------------------------------------------------- |
-| Gemma-4 31B       | Google     |              30.7 | dense |         | Q5_K_M    |     21.66 | [`unsloth/gemma-4-31B-it-GGUF`](https://huggingface.co/unsloth/gemma-4-31B-it-GGUF)                                           |
-| Gemma-4 12B       | Google     |              12.0 | dense |         | Q8_0      |     12.67 | [`unsloth/gemma-4-12B-it-GGUF`](https://huggingface.co/unsloth/gemma-4-12B-it-GGUF)                                           |
-| Mistral-Small 24B | Mistral AI |              24.0 | dense |         | Q5_K_M    |     16.76 | [`unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF`](https://huggingface.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF) |
-| Gemma-4 E4B       | Google     |           8.0/4.5 | dense |         | Q8_0      |      8.19 | [`unsloth/gemma-4-E4B-it-GGUF`](https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF)                                           |
-| Gemma-4 26B-A4B   | Google     |          25.2/3.8 | MoE   |         | UD-Q5_K_M |     21.15 | [`unsloth/gemma-4-26B-A4B-it-GGUF`](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF)                                   |
-| Ministral-3 14B   | Mistral AI |              14.0 | dense |         | Q6_K      |     11.09 | [`unsloth/Ministral-3-14B-Instruct-2512-GGUF`](https://huggingface.co/unsloth/Ministral-3-14B-Instruct-2512-GGUF)             |
-| Gemma-4 E2B       | Google     |           5.1/2.3 | dense |         | BF16      |      9.31 | [`ggml-org/gemma-4-E2B-it-GGUF`](https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF)                                        |
-| Gemma-3 27B       | Google     |              27.0 | dense |         | Q5_K_M    |     19.27 | [`unsloth/gemma-3-27b-it-GGUF`](https://huggingface.co/unsloth/gemma-3-27b-it-GGUF)                                           |
-| Phi-4 14B         | Microsoft  |              14.0 | dense |         | Q6_K      |     12.03 | [`unsloth/phi-4-GGUF`](https://huggingface.co/unsloth/phi-4-GGUF)                                                             |
-| MedGemma 27B      | Google     |              27.0 | dense |   yes   | Q5_K_M    |     19.27 | [`unsloth/medgemma-27b-text-it-GGUF`](https://huggingface.co/unsloth/medgemma-27b-text-it-GGUF)                               |
-| Granite-4.1 30B   | IBM        |              30.0 | dense |         | Q5_K_M    |     20.49 | [`ibm-granite/granite-4.1-30b-GGUF`](https://huggingface.co/ibm-granite/granite-4.1-30b-GGUF)                                 |
-| Granite-4.1 8B    | IBM        |               8.0 | dense |         | Q6_K      |      7.22 | [`ibm-granite/granite-4.1-8b-GGUF`](https://huggingface.co/ibm-granite/granite-4.1-8b-GGUF)                                   |
-| Gemma-3 4B        | Google     |               4.0 | dense |         | Q8_0      |      4.13 | [`unsloth/gemma-3-4b-it-GGUF`](https://huggingface.co/unsloth/gemma-3-4b-it-GGUF)                                             |
-| Llama-3.1 8B      | Meta       |               8.0 | dense |         | Q6_K      |      6.60 | [`bartowski/Meta-Llama-3.1-8B-Instruct-GGUF`](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF)               |
-| OLMo-3 7B         | Ai2        |               7.0 | dense |         | Q8_0      |      7.76 | [`lmstudio-community/Olmo-3-7B-Instruct-GGUF`](https://huggingface.co/lmstudio-community/Olmo-3-7B-Instruct-GGUF)             |
-| Gemma-3 1B        | Google     |               1.0 | dense |         | Q8_0      |      1.07 | [`ggml-org/gemma-3-1b-it-GGUF`](https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF)                                           |
-| MedGemma-1.5 4B   | Google     |               4.0 | dense |   yes   | Q8_0      |      4.13 | [`unsloth/medgemma-1.5-4b-it-GGUF`](https://huggingface.co/unsloth/medgemma-1.5-4b-it-GGUF)                                   |
-
-The parameter counts, quantizations, on-disk sizes, and resolving GGUF repositories mirror the manuscript's checkpoint table. Gemma-4 E2B/E4B are total/effective parameters; Gemma-4 26B-A4B is total/active parameters.
-
-The Gemma-4 E2B configuration additionally records the exact BF16 filename and SHA-256 digest reported in the manuscript. Other checkpoint-byte digests and the exact `llama.cpp` source revision are not available in this public snapshot and remain provenance limitations.
-
-## Protocol
-
-`protocol/` contains the exact frozen inputs shared by every evaluated model:
-
-| Path                                | Purpose                                                                     |
-| ----------------------------------- | --------------------------------------------------------------------------- |
-| `protocol/system_prompt.txt`        | Extraction instructions and worked synthetic example.                       |
-| `protocol/user_prompt_template.txt` | Per-segment user message; `{{CLINICAL_TEXT}}` is replaced with the segment. |
-| `protocol/model_output.schema.json` | Strict JSON schema required for model output.                               |
-
-These three files are the complete protocol loaded by `run_model.load_protocol`. They are byte-for-byte identical to the corresponding supplementary material for the manuscript.
-
-## Data availability
-
-The source clinical notes, independent and consensus annotation exports, and raw model responses are not publicly available because they contain or reproduce protected health information and are governed by University of Texas Medical Branch (UTMB) Institutional Review Board (IRB) protocol 26-0014 and institutional privacy restrictions. Researchers may request access to the same study data for a proposed research project. Access requires completion of the applicable UTMB IRB review and institutional data-access processes, including approval of the proposed use, satisfaction of applicable HIPAA authorization or waiver requirements, and execution of any required institutional agreements. Access is subject to the scope and conditions approved by UTMB and cannot be authorized by the authors alone. Requests should be directed to James Weatherhead (jacweath@utmb.edu), who can provide information about initiating the UTMB review process.
-
-Aggregate results and nonidentifying methodological details are provided in the article and Supplementary Material. The restricted clinical data are not distributed through this repository. The repository provides a reviewed reference implementation and a synthetic fixture with a rule-based mock model for methodological inspection and offline execution; these public materials do not independently reproduce the published numerical results.
-
-## Relationship to the study code
-
-This repository is a reviewed reference implementation derived from the study scripts. It is not a byte-for-byte archive of the original execution code; the `1.0.1` release also includes fail-closed validation, rerun, and privacy hardening added during public-release review. Published study outputs were not regenerated for this release.
-
-The following core transformations and definitions align with the study implementation:
-
-* segmentation width and overlap;
-* verbatim grounding;
-* source-offset mapping;
-* two-pass union behavior;
-* redaction rules;
-* metric definitions.
-
-The scorer implements the manuscript's character-, span-, note-, and response-format definitions from the same gold-annotation format. `docs/MANUSCRIPT_MAP.md` maps the manuscript artifacts within repository scope to their code paths, output columns, and constants.
-
-## Testing
-
-Run the complete test suite with:
-
-```bash
 python3 -m unittest discover -s tests -v
 ```
 
-The suite:
+`make selftest` runs a rule-based test substitute over three synthetic notes and scores its predictions. It was not used for the manuscript's LLM results. On this fixture it covers 253 of 335 annotated characters, removes no characters outside the reference spans, and leaves no annotated characters visible in one of the three notes. Those numbers describe the test substitute and fixture, not a language model.
 
-* runs the offline test stub over the synthetic fixture;
-* checks the scored result against hand-derived expected values;
-* verifies segmentation coverage;
-* verifies verbatim propagation;
-* verifies resolver and redaction invariants;
-* verifies that Pass-2 matches crossing a redaction marker are dropped;
-* verifies gold-driven denominators and rejects missing, extra, or invalid prediction artifacts;
-* verifies safe reruns, private output permissions, telemetry-only response persistence, and endpoint restrictions; and
-* verifies the matched three-run bootstrap implementation used for confidence intervals.
+Each of these three notes fits within one default segment, so this example does not exercise overlapping windows. The separate [long synthetic example](fixtures/long_synthetic/README.md) demonstrates boundary handling and document-wide matching, including over-redaction of a matching string in a non-identifying context.
 
-## Citation
+`make` is optional. The equivalent Python commands and package installation instructions are in [Usage](docs/USAGE.md).
 
-When using this software, cite the accompanying article:
+### Run a local model
 
-*Clinical Text De-identification with Locally Deployed Open-Weight Large Language Models: A Real-World Evaluation of Discharge Notes.*
+This example uses Gemma 3 1B on an Apple Silicon Mac. It is a small checkpoint for trying the software, not a recommendation for clinical use.
 
-Machine-readable citation metadata are provided in [`CITATION.cff`](CITATION.cff).
+```bash
+brew install llama.cpp
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -U huggingface_hub
 
-Security and privacy issues should be reported as described in [`SECURITY.md`](SECURITY.md).
+hf download ggml-org/gemma-3-1b-it-GGUF \
+    gemma-3-1b-it-Q8_0.gguf --local-dir models/gemma-3-1b-it
 
-## License
+scripts/run_local_end_to_end.sh \
+    --gguf models/gemma-3-1b-it/gemma-3-1b-it-Q8_0.gguf \
+    --model-id gemma-3-1b-it \
+    --out-dir out/gemma-example
+```
 
-MIT. See [`LICENSE`](LICENSE). Model weights are third-party artifacts governed
-by their own terms; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+The script starts the server, runs both passes, scores the predictions, draws example charts, and stops the server. Runtime and predictions depend on the checkpoint, server build, launch settings, and hardware; the example is not a promise of a particular score or execution time.
+
+Use a new output directory for a separate execution. Replacing an existing model output requires `--overwrite-model-output`. Run `scripts/run_local_end_to_end.sh --help` for options, or see [Usage](docs/USAGE.md) for other models, hardware, and corpora.
+
+## How the pipeline works
+
+The model identifies strings; Python determines their positions. The model is not asked to rewrite the note or return offsets. Offsets throughout the implementation refer to Unicode codepoints in the original note, with half-open `[start, end)` intervals.
+
+![Evaluation workflow: reference annotation and local two-pass inference are compared against the original note.](docs/images/methods-pipeline.png)
+
+*Panel B of manuscript Figure 1. This schematic illustrates the study workflow; the public runner saves prediction offsets rather than final redacted text files.*
+
+### 1. Segment the note
+
+`pipeline.fixed_segments` divides a note into windows of at most 3,500 codepoints with 400 codepoints of overlap. Overlap helps keep identifiers near a boundary available in full in an adjacent segment; it does not guarantee that an arbitrary identifier or all relevant context will fit in a window.
+
+### 2. Request structured extraction
+
+Each segment is submitted with the frozen [system prompt](protocol/system_prompt.txt), [user template](protocol/user_prompt_template.txt), and [JSON schema](protocol/model_output.schema.json). A response has this structure:
+
+```json
+{"identifiers": [{"exact_text": "Dana Kim", "identifier_type": "01_NAME"}]}
+```
+
+The 18 study-specific categories are based on HIPAA Safe Harbor. The annotation policy includes clinician names, named facilities and care sites used as care locations, and year-only dates directly related to an individual. It is not a claim that these labels reproduce the regulatory categories without study-specific conventions.
+
+Requests specify temperature `0`, seed `42`, and `reasoning_effort: "low"`. These settings do not guarantee identical model outputs across runtimes or hardware, or that every checkpoint interprets the reasoning setting identically. The text operations are deterministic for fixed inputs.
+
+### 3. Validate and locate the strings
+
+The runner distinguishes a usable response from a fully schema-valid response. A usable response is a JSON object containing an identifier list. Individual records are accepted only with the two required fields, a valid type, and a nonempty string occurring verbatim in the supplied segment. Valid records can be retained even when other records or the surrounding response fail stricter checks.
+
+Accepted strings are pooled across segments. `pipeline.resolve_pairs` then finds every exact, case-sensitive substring occurrence in the current full-note representation, including occurrences outside the segment that produced the string. There is no fuzzy matching, normalization, or word-boundary restriction.
+
+This can recover repeated identifiers, but it can also redact a matching string in a non-identifying context elsewhere. Grounding confirms that text occurs in the input; it does not confirm that every occurrence is an identifier.
+
+### 4. Run the second pass
+
+The software replaces Pass 1 regions with `[PHI]`, segments that partially redacted representation, and processes it with the same extraction protocol. New findings are mapped back to the original note. Matches touching an inserted marker are discarded because they cannot map to a contiguous source span.
+
+Pass 2 additions are applied only when every expected Pass 2 segment finishes with `stop` and returns a usable response. Otherwise, the note retains Pass 1 predictions alone. Pass 2 can add a redaction but cannot undo one; strict schema validity is recorded separately and is not the application gate.
+
+Implementation: [run_model.process_document](src/deid/run_model.py).
+
+### 5. Score the prediction offsets
+
+The runner saves offsets and identifier types, not final redacted `.txt` files. `pipeline.neutral_redaction` and `pipeline.typed_redaction` can render text for inspection; the scorer evaluates the offsets directly.
+
+Accuracy metrics use the reference annotation JSON and `resolved_predictions.json`. Character recall is type-agnostic: a reference-identifier character counts as covered by any predicted redaction, regardless of its assigned category. Note-level completeness requires coverage of every annotated identifier character in that note, not proof that no identifying information remains.
+
+Operational and response-format metrics additionally use response telemetry, validation records, and the expected-segment manifests. Conditional response-format rates are not end-to-end success rates. See [DATA_DICTIONARY.md](DATA_DICTIONARY.md) for definitions and the treatment of older outputs without manifests.
+
+## Outputs and sensitive data
+
+The local-model example writes under `out/gemma-example/`:
+
+| Path | Contents |
+| --- | --- |
+| `predictions/<model>/resolved/` | Pass 1 prediction offsets and types. |
+| `predictions/<model>/pass_2/resolved/` | Cumulative predictions after the Pass 2 application rule. |
+| `predictions/<model>/inference_manifest.json` | Run settings, code and protocol hashes, and available checkpoint/server provenance. |
+| `predictions/<model>/expected_segments/` and `pass_2/expected_segments/` | Per-note segment plans, saved before the requests for each pass. |
+| `raw_responses/` and `validation/`, within each pass directory | Response telemetry and validation outcomes. |
+| `metrics_long.csv`, `per_doc_long.csv` | Aggregate metrics and per-note counts. |
+| `model_manifest.csv`, `run_manifest.json` | Model metadata and scoring definitions. |
+| `figures/` | SVG charts and their plotted values as CSV. These are not the manuscript's figure images. |
+| `llama-server.log` | Server output; inspect and protect it separately from response telemetry. |
+
+Generated response text is omitted from runner artifacts by default. Retaining it requires both `--retain-raw-content` and `--acknowledge-phi-risk`; on real notes it may repeat identifiers. Even without literal text, document IDs, source hashes, counts, paths, and model/server metadata can be sensitive. Keep all outputs in approved storage; `.gitignore` is not an access control.
+
+The runner uses private file permissions and refuses to reuse model output directories without an explicit overwrite. The shell launcher accepts loopback endpoints only. Direct Python use can accept an HTTPS remote endpoint with `--allow-remote-api`; that option does not establish institutional authorization. Server logs and any separately rendered text require their own review. See [SECURITY.md](SECURITY.md).
+
+## What can be reproduced
+
+The public examples exercise the implementation on synthetic inputs. The analysis scripts can process suitably formatted outputs, but the repository alone cannot reproduce the study's numerical results. The clinical notes, independent and consensus annotations, and retained study responses are not distributed here. Exact checkpoint provenance is also incomplete for 16 models, and the exact `llama.cpp` source revision and build flags were not preserved in the available study record.
+
+New runs record more provenance than the original public snapshot. Those records describe the new execution; they do not recover missing study metadata or establish that a supplied endpoint loaded the claimed weights. The [reproducibility notes](docs/REPRODUCIBILITY.md) distinguish the study record, the cited release, and current behavior.
+
+The study used 100 clinician-authored UTMB discharge notes from 2021, with 3,537 consensus identifier spans across nine study categories. Two HIPAA-trained reviewers independently annotated the notes and reconciled disagreements. The 20 calibration notes and 10 reserve notes were not part of the reported test-set estimates. The public examples are not substitutes for external clinical validation.
+
+### Data access
+
+The source notes, independent and consensus annotation exports, and raw model responses contain or reproduce protected health information and are governed by UTMB IRB protocol `26-0014` and institutional privacy restrictions. Researchers may request access for a proposed project, but access requires the applicable UTMB IRB and institutional review, applicable HIPAA authorization or waiver requirements, and any required agreements. The authors cannot authorize access alone. Contact James Weatherhead at `jacweath@utmb.edu` for information about initiating review.
+
+## Further documentation
+
+- [Usage](docs/USAGE.md): installation, other hardware, model selection, and evaluating your own notes.
+- [Reference annotations](docs/ANNOTATIONS.md): INCEpTION setup, export format, and example JSON.
+- [Model checkpoints](docs/MODELS.md): the 17 study checkpoints and available provenance.
+- [Analysis scripts](docs/ANALYSIS.md): tables, figures, and matched three-execution bootstrap inputs.
+- [Manuscript map](docs/MANUSCRIPT_MAP.md): methods, metrics, tables, figures, and analyses outside this repository.
+
+## Citation and license
+
+When using this work, cite the accompanying manuscript and the software commit or release actually used. [CITATION.cff](CITATION.cff) describes the cited `v1.0.1` release; changes on `main` do not replace that snapshot.
+
+The software is MIT licensed; see [LICENSE](LICENSE). Model weights have separate terms listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

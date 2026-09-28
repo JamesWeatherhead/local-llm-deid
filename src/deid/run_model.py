@@ -1,4 +1,4 @@
-"""Run one model over a set of notes: two sequential passes, then redact.
+"""Run two extraction passes and save source-offset predictions for scoring.
 
 For each note the runner performs the locked protocol:
 
@@ -19,9 +19,9 @@ The output tree mirrors what the scorer reads::
     <out>/<model_id>/pass_2/raw_responses/<doc>/P2-*.raw.json
     <out>/<model_id>/pass_2/validation/<doc>/P2-*.validation.json
 
-Run with ``--offline-stub`` to exercise the pipeline offline with the
-deterministic test stub (no model, no GPU); every reported result comes from a
-real local model via the llama-server client.
+The runner builds redacted text internally for Pass 2; it does not save final
+redacted text files. ``--offline-stub`` runs a rule-based test substitute, which
+was not used for the manuscript's LLM results.
 """
 
 from __future__ import annotations
@@ -36,7 +36,8 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Optional
 
-from .inference import LlamaServerClient, StubExtractor
+from .inference import LlamaServerClient, StubExtractor, TEMPERATURE, SEED, REASONING_EFFORT
+from .provenance import inference_manifest, segment_manifest
 from .pipeline import (
     fixed_segments,
     identity_map,
@@ -217,6 +218,8 @@ def process_document(client, doc_id: str, source: str, model_dir: Path,
     """
     # --- Pass 1: over the original note ---
     segments = fixed_segments(source, segment_size, overlap)
+    write_json(model_dir / "expected_segments" / doc_id / "manifest.json",
+               segment_manifest(doc_id, source, source, 1, segments, segment_size, overlap))
     pairs, records = _run_segments(client, segments)
     _persist_segments(model_dir, doc_id, 1, records, strip_content)
 
@@ -228,6 +231,8 @@ def process_document(client, doc_id: str, source: str, model_dir: Path,
     pass2_dir = model_dir / "pass_2"
     representation, coordinate_map = redacted_representation_with_map(source, union_regions(pass1))
     segments2 = fixed_segments(representation, segment_size, overlap)
+    write_json(pass2_dir / "expected_segments" / doc_id / "manifest.json",
+               segment_manifest(doc_id, source, representation, 2, segments2, segment_size, overlap))
     pairs2, records2 = _run_segments(client, segments2)
     _persist_segments(pass2_dir, doc_id, 2, records2, strip_content)
 
@@ -260,7 +265,10 @@ def run_model(model_id: str, notes_dir: Path, out_dir: Path, protocol_dir: Path,
               request_timeout: Optional[float] = None,
               overwrite_model_output: bool = False,
               allow_remote_api: bool = False,
-              acknowledge_phi_risk: bool = False) -> Path:
+              acknowledge_phi_risk: bool = False,
+              checkpoint_files: Optional[list[Path]] = None,
+              server_version: Optional[str] = None,
+              server_command: Optional[list[str]] = None) -> Path:
     """Run ``model_id`` over every ``*.txt`` note in ``notes_dir``."""
     if not MODEL_ID_PATTERN.fullmatch(model_id):
         raise ValueError(
@@ -304,6 +312,15 @@ def run_model(model_id: str, notes_dir: Path, out_dir: Path, protocol_dir: Path,
     # requested overwrite removes any prior artifacts.
     fixed_segments("", segment_size, overlap)
     client = make_client(model_id, protocol_dir, use_stub, api_base, name_gazetteer, request_timeout)
+    manifest = inference_manifest(
+        model_id=model_id, protocol_dir=protocol_dir, segment_size=segment_size,
+        overlap=overlap, use_stub=use_stub,
+        decoding={"temperature": TEMPERATURE, "seed": SEED,
+                  "reasoning_effort": REASONING_EFFORT, "response_format": "json_schema"},
+        request_timeout=request_timeout, strip_content=strip_content,
+        checkpoint_files=checkpoint_files or [], server_version=server_version,
+        server_command=server_command, name_gazetteer=name_gazetteer,
+    )
 
     if out_dir.is_symlink():
         raise ValueError(f"refusing symlinked output directory: {out_dir}")
@@ -327,6 +344,8 @@ def run_model(model_id: str, notes_dir: Path, out_dir: Path, protocol_dir: Path,
 
     model_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
     model_dir.chmod(0o700)
+
+    write_json(model_dir / "inference_manifest.json", manifest)
 
     # Optional metadata: copy the model_config.json the scorer carries into results.
     if model_config_text is not None:
@@ -362,6 +381,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"overlap between windows in codepoints (study default: {SEGMENT_OVERLAP})")
     parser.add_argument("--model-config", type=Path, default=None,
                         help="model_config.json to copy into the output dir (metadata for the scorer)")
+    parser.add_argument("--checkpoint-file", type=Path, action="append", default=None,
+                        help="checkpoint to hash for this run; repeat for multiple files")
+    parser.add_argument("--server-version", default=None,
+                        help="recorded llama-server --version output, when known")
+    parser.add_argument("--server-command", nargs=argparse.REMAINDER, default=None,
+                        help="record the server launch command; must be the final option")
     raw_group = parser.add_mutually_exclusive_group()
     raw_group.add_argument(
         "--strip-raw-content", dest="strip_raw_content", action="store_true",
@@ -403,6 +428,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         overwrite_model_output=args.overwrite_model_output,
         allow_remote_api=args.allow_remote_api,
         acknowledge_phi_risk=args.acknowledge_phi_risk,
+        checkpoint_files=args.checkpoint_file, server_version=args.server_version,
+        server_command=args.server_command,
     )
     print(f"wrote artifacts under {model_dir}")
     return 0

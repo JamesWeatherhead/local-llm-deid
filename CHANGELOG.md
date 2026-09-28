@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+* Shorten the README and separate usage, annotation, checkpoint, analysis, and provenance documentation.
+* Clarify the relationship to the study software, actual saved outputs, exact-string propagation, and conditional response-format metrics.
+* Update model downloads to the Hugging Face `hf` command.
+* Record run settings, code and protocol hashes, and available checkpoint/server provenance for new executions.
+* Save expected segment plans before requests and check record coverage when reporting operational completeness. Legacy outputs without plans retain accuracy scoring but have unknown expected request counts and unverified coverage.
+* Add a separate long synthetic example and regression tests for boundaries, second-pass mapping, non-identifying string matches, and missing request records.
+
+The frozen protocol, study results, and cited `v1.0.1` tag are unchanged. No clinical inference or reported study analyses were rerun for this update.
+
 ## 1.0.1 - 2026-08-25
 
 Reliability and reproducibility release:

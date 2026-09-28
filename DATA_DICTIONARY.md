@@ -1,220 +1,227 @@
 # Data dictionary
 
-The scorer (`deid.metrics`) writes four files into its output directory. They
-omit identifier literals, but they are not guaranteed to be non-sensitive:
-document IDs, source hashes, model IDs, local provenance, and small-cell counts
-can be identifying or confidential in a real clinical workflow. Keep the whole
-output tree under the controls required by the governing protocol.
+The scorer writes `metrics_long.csv`, `per_doc_long.csv`, `model_manifest.csv`,
+and `run_manifest.json`. Accuracy calculations read the reference annotations
+and prediction offsets. Operational and response-format calculations also read
+response telemetry, validation records, and available expected-segment plans.
 
-- `metrics_long.csv` — the main results table (one row per model × pass × cohort × PHI type)
-- `per_doc_long.csv` — per-note character counts and reliability (one row per model × note × pass)
-- `model_manifest.csv` — the metadata carried for each model, plus the gold types it was scored against
-- `run_manifest.json` — a description of the scoring run (definitions, coordinate system, counts)
+Outputs omit identifier literals but can contain sensitive document IDs, hashes,
+counts, and provenance. Keep them under the controls governing the source data.
+In the legacy column names below, **PHI means the identifier characters marked in
+the reference annotations**, not every potentially identifying fact in a note.
+Zero residual reference characters does not establish anonymity.
 
-Coordinate system throughout: Unicode codepoints, half-open `[start, end)`, with
-the gold `text` as the reference. An empty cell means the value is undefined (a
-zero denominator) or not applicable to that row.
+Offsets are Unicode codepoints, half-open `[start, end)`, relative to the reference
+`text`. An empty cell means undefined, not applicable, or unavailable; unknown
+request coverage is not represented as zero requests.
 
 ## Correspondence to the manuscript
 
-The manuscript and this scorer use the same definitions; some names differ, and
-the scorer also emits diagnostic columns the manuscript does not report. A full
-crosswalk (tables, figures, and methods) is in
-[docs/MANUSCRIPT_MAP.md](docs/MANUSCRIPT_MAP.md). In brief:
+`char_recall`, `char_precision`, and `over_redaction_rate` are the manuscript's
+character recall, character precision, and share of redacted characters outside
+the reference spans. `relaxed_span_f1` is the reported boundary-tolerant span F1.
+`zero_residual_note_rate` is annotation-based note-level completeness.
 
-- The manuscript's "character" is a Unicode codepoint here; the two coincide for
-  this corpus.
-- `char_recall` is the manuscript's headline "PHI removed"; `char_precision` is
-  "redactions within PHI"; `over_redaction_rate` is the share of removed
-  characters outside PHI shown on the horizontal axis of the safety-utility figure.
-- `any_span_recall`, `full_span_recall`, `relaxed_span_recall`, and
-  `strict_span_recall` are the manuscript's any-overlap, full-coverage,
-  "within 2 characters" (boundary-tolerant), and exact-boundary criteria; the
-  reported "Span F1" is `relaxed_span_f1`.
-- `usable_rate` is the manuscript's "usable structured response"; `json_valid_rate`
-  is its strict-JSON-valid measure.
-- `zero_residual_note_rate` is the manuscript's complete-removal-per-note measure.
-- The manuscript reports the `all_expected` cohort with micro-averaging and
-  means across three separate temperature-0 stability executions. The
-  `operational_complete` cohort, every `*_macro` column, and `finish_stop_rate`
-  are diagnostics it does not report; the scorer produces one execution at a
-  time.
-- The results table's 95% confidence intervals for character recall and
-  completeness are note-level bootstraps reproduced by `scripts/bootstrap_ci.py`
-  (10,000 resamples, seed 20260801). Repeat `--per-doc` for all three matched
-  executions; the script averages stored values by note before resampling. The
-  scorer itself emits point estimates only.
+The manuscript reports `all_expected` accuracy, micro-averaged within each
+execution and averaged across three separate locked stability executions. The
+runner and scorer process one execution at a time. The `operational_complete`
+cohort, macro averages, and `finish_stop_rate` are additional diagnostics.
+Usable-response and strict-schema-valid rates on cumulative Pass 2 rows are
+conditional on available Pass 2 validation records, not full-pipeline success.
 
-Per-column definitions follow.
+Confidence intervals are computed separately by `scripts/bootstrap_ci.py` from
+matched per-note outputs, with across-execution averaging before 10,000 note-level
+resamples (seed `20260801`). See [the manuscript map](docs/MANUSCRIPT_MAP.md) and
+[analysis instructions](docs/ANALYSIS.md).
 
 ## `metrics_long.csv` (70 columns)
 
-Each model emits one `ALL` row per (pass, cohort) carrying every column, plus one
-partial row per gold PHI type present. On the per-type rows only recall,
-coverage, type-matched precision, and span recall are populated; note-level,
-reliability, macro, and type-agnostic precision columns are blank because a false
-positive cannot be attributed to a single gold type.
+One row per model, pass, cohort, and reference category. The `ALL` row contains
+note-wide metrics. Per-category rows contain recall/coverage, type-matched
+precision, and span recall. Their note-level, operational, macro, and
+type-agnostic precision fields are blank.
 
 ### Model identity and metadata
 
-Sourced from an optional `model_config.json` beside the model's outputs; blank if
-that file is absent (as in the synthetic fixture run).
+Optional metadata come from `model_config.json` beside the predictions. A run
+label does not verify the checkpoint loaded by the server.
 
 | Column | Meaning |
 | --- | --- |
-| `model_id` | Model run label (the directory name under the predictions root). |
-| `hf_link` | Hugging Face URL for the weights (derived from `hf_gguf_repo`). |
-| `hf_gguf_repo` | Hugging Face repository id of the quantized GGUF weights. |
-| `developer` | Organization that trained the base model. |
+| `model_id` | Run label, also the model directory name. |
+| `hf_link` | Hugging Face link derived from `hf_gguf_repo`. |
+| `hf_gguf_repo` | Recorded GGUF repository. |
+| `developer` | Recorded model developer. |
 | `family` | Model family. |
-| `params_total_B` | Total parameters, in billions. |
-| `params_effective_B` | Effective parameters, in billions, when the developer distinguishes them from the total (Gemma-4 E2B/E4B). |
-| `params_active_B` | Active parameters per token, in billions (mixture-of-experts only). |
-| `moe` | Whether the model is mixture-of-experts. |
-| `is_medical` | Whether the model is domain-adapted for medicine. |
-| `is_reasoning` | Whether the model is a dedicated reasoning model. |
-| `quant` | Quantization of the evaluated GGUF (e.g. `Q5_K_M`). |
-| `n_docs` | Number of notes defined by the gold set; missing model outputs remain in scope and score as full misses. |
-| `doc_provenance` | Reserved provenance label (blank in this release). |
+| `params_total_B` | Total parameters in billions. |
+| `params_effective_B` | Effective parameters where distinguished from the total, such as Gemma-4 E2B/E4B. |
+| `params_active_B` | Active parameters per token for mixture-of-experts models. |
+| `moe` | Whether the recorded architecture is mixture-of-experts. |
+| `is_medical` | Whether the model is recorded as medically domain-adapted. |
+| `is_reasoning` | Whether the configuration labels it a dedicated reasoning model. |
+| `quant` | Recorded checkpoint quantization, such as `Q5_K_M`. |
+| `n_docs` | Number of notes in the reference set, including notes with missing predictions. |
+| `doc_provenance` | Reserved provenance label; currently blank. |
 
 ### Row keys
 
 | Column | Meaning |
 | --- | --- |
-| `pass` | `pass1` or `cumulative_pass2` (Pass 1 ∪ the applied Pass 2). |
-| `surface` | Redaction surface scored; always `final`. |
-| `cohort` | `all_expected` (every gold note; a missing output is a full miss) or `operational_complete` (only notes whose every segment finished with `stop` and, where validation records exist, was usable). |
-| `phi_type` | `ALL` for the note-wide row, or a two-digit Safe Harbor code (`01_NAME`, `02_GEOGRAPHIC_SUBDIVISION`, …) for a per-category row. |
+| `pass` | `pass1` or `cumulative_pass2`, the union of Pass 1 and applied Pass 2 predictions. |
+| `surface` | Always `final`: the predicted coverage mask. It does not imply a saved redacted text file. |
+| `cohort` | `all_expected`: every reference note. `operational_complete`: only passes with verified record coverage and a `stop`, usable response for every expected segment. |
+| `phi_type` | `ALL`, or a study category such as `01_NAME`. The 18-category schema is based on HIPAA Safe Harbor with study-specific conventions. |
 
 ### Totals
 
 | Column | Meaning |
 | --- | --- |
-| `n_notes` | Notes included in this (pass, cohort). |
-| `doc_chars_total` | Total characters across the included notes. |
-| `gt_phi_chars` | Gold PHI characters. |
-| `pred_phi_chars` | Predicted (redacted) characters. |
-| `gt_span_count` | Gold PHI spans. |
-| `pred_span_count` | Predicted spans. |
+| `n_notes` | Number of notes in this pass/cohort. |
+| `doc_chars_total` | Total source characters in those notes. |
+| `gt_phi_chars` | Reference-identifier character count. |
+| `pred_phi_chars` | Characters covered by predicted redactions. |
+| `gt_span_count` | Reference identifier spans. |
+| `pred_span_count` | Unique predicted start/end intervals, ignoring type. |
 
-### Character level — type-agnostic (headline)
+### Type-agnostic character metrics
 
-A gold PHI character counts as covered if it falls under *any* redaction.
+A reference character counts as covered by any redaction, regardless of the
+predicted type. Overlapping intervals do not count a character more than once.
 
 | Column | Meaning |
 | --- | --- |
-| `char_tp` | Gold PHI chars covered by any redaction. |
-| `char_fp` | Redacted chars that are not gold PHI (over-redaction). |
-| `char_fn` | Gold PHI chars left unredacted (equals `residual_phi_chars`). |
-| `char_tn` | Non-PHI chars correctly left intact. |
-| `char_recall` | `char_tp / gt_phi_chars` — the headline PHI-removal metric. |
+| `char_tp` | Reference characters covered by a redaction. |
+| `char_fp` | Redacted characters outside the reference spans. |
+| `char_fn` | Reference characters not covered; equals `residual_phi_chars`. |
+| `char_tn` | Characters outside reference spans left intact. |
+| `char_recall` | `char_tp / gt_phi_chars`. |
 | `char_precision` | `char_tp / pred_phi_chars`. |
-| `char_f1` | Harmonic mean of `char_recall` and `char_precision`. |
+| `char_f1` | Harmonic mean of character precision and recall. |
 | `char_specificity` | `char_tn / (char_tn + char_fp)`. |
-| `over_redaction_rate` | `char_fp / pred_phi_chars` (i.e. `1 − char_precision`). |
-| `residual_phi_chars` | Gold PHI chars still present after redaction (equals `char_fn`). |
-| `residual_phi_char_rate` | `residual_phi_chars / gt_phi_chars` (i.e. `1 − char_recall`). |
+| `over_redaction_rate` | `char_fp / pred_phi_chars`, or `1 - char_precision`; not `FP/(FP+TN)`. |
+| `residual_phi_chars` | Uncovered reference characters. |
+| `residual_phi_char_rate` | `residual_phi_chars / gt_phi_chars`, or `1 - char_recall`. |
 
-### Character level — type-matched (per-category)
+### Type-matched character metrics
 
-A gold character counts only when covered by a redaction of the *same* type. On
-the `ALL` row this trio mirrors the type-agnostic trio; the real per-category
-signal lives on the per-type rows.
-
-| Column | Meaning |
-| --- | --- |
-| `char_recall_typematched` | Gold chars covered by a same-type redaction / gold chars. |
-| `char_precision_typematched` | Same-type-covered gold chars / chars predicted as this type. |
-| `char_f1_typematched` | Harmonic mean of the two. |
-
-### Span level
-
-Four detection criteria per gold span: any overlap, full coverage, strict
-(exact boundary) match, and relaxed (both boundaries within ±2 codepoints,
-i2b2-style).
-
-Strict and relaxed boundary matches are non-exclusive: one prediction may
-qualify more than one nearby gold span, and vice versa.
+Per-category matches require agreement with the reference category's two-digit
+code. On the `ALL` row these three fields mirror the type-agnostic metrics; they
+are not a separate overall classification score.
 
 | Column | Meaning |
 | --- | --- |
-| `any_span_tp` | Gold spans with ≥1 character covered. |
+| `char_recall_typematched` | Reference characters covered by a same-type redaction / reference characters of that type. |
+| `char_precision_typematched` | Same-type-covered reference characters / characters predicted as that type, within the contributing notes. |
+| `char_f1_typematched` | Harmonic mean of the two type-matched rates. |
+
+### Span metrics
+
+Any-overlap and full-coverage metrics measure removal of reference characters.
+Strict and relaxed metrics measure boundary agreement. Both ignore identifier
+type. Relaxed matching allows each endpoint to differ by at most two codepoints.
+Matches are non-exclusive: one span may qualify more than one nearby span on the
+other side. These are not one-to-one entity-assignment scores.
+
+| Column | Meaning |
+| --- | --- |
+| `any_span_tp` | Reference spans with at least one character covered. |
 | `any_span_recall` | `any_span_tp / gt_span_count`. |
-| `full_span_tp` | Gold spans fully covered. |
+| `full_span_tp` | Reference spans with every character covered. |
 | `full_span_recall` | `full_span_tp / gt_span_count`. |
-| `strict_span_tp` | Predicted spans matching a gold span exactly on both boundaries. |
+| `strict_span_tp` | Reference spans with an exact predicted start/end match. |
 | `strict_span_recall` | `strict_span_tp / gt_span_count`. |
-| `strict_span_precision` | `strict_span_tp / pred_span_count`. |
+| `strict_span_precision` | `strict_span_tp / pred_span_count`, as implemented. |
 | `strict_span_f1` | Harmonic mean of strict precision and recall. |
-| `relaxed_span_tp` | Gold spans matched within ±2 codepoints on both boundaries. |
+| `relaxed_span_tp` | Reference spans matched within two codepoints at both endpoints. |
 | `relaxed_span_recall` | `relaxed_span_tp / gt_span_count`. |
-| `relaxed_span_precision` | Predicted spans within ±2 of some gold span / `pred_span_count`. |
+| `relaxed_span_precision` | Predicted spans within two codepoints of some reference span / `pred_span_count`. |
 | `relaxed_span_f1` | Harmonic mean of relaxed precision and recall. |
 
-### Note level (`ALL` row only)
+### Note-level metrics (`ALL` rows)
 
 | Column | Meaning |
 | --- | --- |
-| `zero_residual_notes` | Notes with no residual PHI after redaction (complete removal). |
+| `zero_residual_notes` | Notes with no remaining annotated identifier characters. |
 | `zero_residual_note_rate` | `zero_residual_notes / n_notes`. |
-| `notes_with_leak` | Notes with ≥1 residual PHI character. |
+| `notes_with_leak` | Notes with at least one uncovered reference character. |
 | `notes_with_leak_rate` | `notes_with_leak / n_notes`. |
-| `mean_residual_per_note` | Mean residual PHI chars per note. |
-| `median_residual_per_note` | Median residual PHI chars per note. |
-| `max_residual_per_note` | Worst-case residual PHI chars in a single note. |
+| `mean_residual_per_note` | Mean uncovered reference characters per note. |
+| `median_residual_per_note` | Median uncovered reference characters per note. |
+| `max_residual_per_note` | Largest uncovered-reference-character count in one note. |
 
-### Reliability and cost (`ALL` row only)
-
-| Column | Meaning |
-| --- | --- |
-| `expected_requests` | Total segment requests issued (sum of segments over notes). |
-| `usable_requests` | Requests whose response envelope was usable (validated subset). |
-| `usable_rate` | `usable_requests /` validated requests. |
-| `json_valid_requests` | Requests whose content passed strict schema validation. |
-| `json_valid_rate` | `json_valid_requests /` validated requests. |
-| `finish_stop_rate` | Requests finishing with `finish_reason == "stop"` / `expected_requests`. |
-| `prompt_tokens` | Total prompt tokens across requests. |
-| `completion_tokens` | Total completion tokens across requests. |
-
-### Macro averages (`ALL` row only)
-
-Micro-averaging (sum counts, then take the rate) is the default everywhere above.
-These columns give the macro alternative: the mean of the per-note rates.
+### Operational and response-format metrics (`ALL` rows)
 
 | Column | Meaning |
 | --- | --- |
-| `char_recall_macro` | Mean of per-note character recall. |
-| `char_precision_macro` | Mean of per-note character precision. |
-| `char_f1_macro` | Mean of per-note character F1. |
-| `strict_span_recall_macro` | Mean of per-note strict span recall. |
-| `relaxed_span_recall_macro` | Mean of per-note relaxed span recall. |
+| `expected_requests` | Sum of independently planned segments, not surviving response files. Blank if any included note lacks a plan for that pass. |
+| `usable_requests` | Usable responses among available validation records. |
+| `usable_rate` | `usable_requests /` available validation records. |
+| `json_valid_requests` | Strict-schema-valid responses among available validation records. |
+| `json_valid_rate` | `json_valid_requests /` available validation records. |
+| `finish_stop_rate` | Observed `stop` responses / known `expected_requests`; blank when the expected count is unknown. |
+| `prompt_tokens` | Sum of recorded prompt tokens in parseable response artifacts. |
+| `completion_tokens` | Sum of recorded completion tokens in parseable response artifacts. |
+
+The cumulative Pass 2 rows describe **Pass 2 requests**, not the combined token
+cost or request-success rate of both passes. Missing response or validation
+records prevent verified operational completeness but do not erase saved
+predictions. Conditional format rates may remain 1.0 despite missing records.
+Unknown token usage is not recovered by these sums. The stub's token fields are
+simple word-count stand-ins, not measured model tokenization or inference cost.
+
+### Macro averages (`ALL` rows)
+
+Micro-averaging pools counts before computing each rate. Macro fields are means
+of per-note rates, skipping notes whose relevant denominator is zero.
+
+| Column | Meaning |
+| --- | --- |
+| `char_recall_macro` | Mean per-note character recall. |
+| `char_precision_macro` | Mean per-note character precision. |
+| `char_f1_macro` | Mean per-note character F1. |
+| `strict_span_recall_macro` | Mean per-note strict-span recall. |
+| `relaxed_span_recall_macro` | Mean per-note relaxed-span recall. |
 
 ## `per_doc_long.csv`
 
-One row per model × note × pass.
+One row per model, note, and pass, including all reference notes.
 
 | Column | Meaning |
 | --- | --- |
 | `model_id`, `n_docs` | As above. |
-| `doc` | Note id. |
+| `doc` | Note ID. |
 | `pass_` | `pass1` or `cumulative_pass2`. |
-| `doc_chars` | Note length in characters. |
-| `gt_phi_chars`, `pred_phi_chars` | Gold and predicted character counts for the note. |
-| `char_tp`, `char_fp`, `char_fn` | Per-note character confusion counts. |
-| `residual_phi_chars` | Gold PHI chars left unredacted in this note. |
-| `zero_residual` | `1` if the note has no residual PHI, else `0`. |
-| `gt_spans`, `any_span_hits` | Gold spans and how many had ≥1 char covered. |
-| `n_segments`, `usable_segments`, `finish_stop` | Per-note reliability counts. |
-| `operational_complete` | `1` if every segment finished with `stop` and, where validated, was usable (drives the cohort split). |
+| `doc_chars` | Source-note length in codepoints. |
+| `gt_phi_chars`, `pred_phi_chars` | Reference and predicted character counts. |
+| `char_tp`, `char_fp`, `char_fn` | Per-note confusion counts. |
+| `residual_phi_chars` | Uncovered reference characters. |
+| `zero_residual` | 1 when no reference character remains uncovered; otherwise 0. |
+| `gt_spans`, `any_span_hits` | Reference spans and spans with at least one character covered. |
+| `n_segments` | Observed parseable response-artifact count for this pass. |
+| `usable_segments` | Usable responses in available validation records. |
+| `finish_stop` | Observed responses with finish reason `stop`. |
+| `expected_segments` | Independently planned count; blank for missing or legacy plans. |
+| `segment_coverage_verified` | 1 when a valid plan and matching, consistent response/validation record sets exist; otherwise 0. |
+| `operational_complete` | 1 when coverage is verified and every expected segment has a `stop`, usable response; otherwise 0. |
 
-## `model_manifest.csv`
+`expected_segments` and `segment_coverage_verified` were added after the cited
+`v1.0.1` snapshot. Older outputs remain scoreable for accuracy, but without a
+plan they cannot establish operational completeness. They are excluded from that
+diagnostic cohort; the `all_expected` accuracy denominator is unchanged.
 
-The metadata block for each model (the identity columns above) plus
-`gold_types_present` (the Safe Harbor codes the model was scored against, joined
-by `;`) and `model_dir` (its output subdirectory).
+## Model and run manifests
 
-## `run_manifest.json`
+`model_manifest.csv` contains the model metadata plus `gold_types_present`
+(category labels joined by `;`) and `model_dir` (the output subdirectory).
 
-A machine-readable description of the run: the gold-directory label (basename only), the coordinate unit,
-the recall and span-recall definitions, the relaxed tolerance, the averaging
-convention, the list of models scored, and the row/column counts of the tables.
+`run_manifest.json` describes scoring: package version, `scorer_sha256`, Python
+and platform, reference-directory basename, offset units, metric definitions,
+cohorts, and output counts. The scorer hash distinguishes source revisions even
+when the last released package version has not changed.
+
+The runner separately writes `inference_manifest.json` inside each model's
+output. It records actual run settings, source/protocol hashes, and available
+checkpoint/server provenance. Per-pass `expected_segments/<doc>/manifest.json`
+files record the pre-request segment plans without literal note text. Full
+provenance and legacy-compatibility details are in
+[Reproducibility](docs/REPRODUCIBILITY.md).

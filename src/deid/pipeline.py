@@ -25,8 +25,8 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence
 
 
-# The 18 HIPAA Safe Harbor identifier categories, in canonical order. The two
-# leading digits are the type code used throughout scoring.
+# The study-specific 18-category schema is based on HIPAA Safe Harbor.
+# The leading digits are the type codes used throughout scoring.
 CANONICAL_TYPES = (
     "01_NAME",
     "02_GEOGRAPHIC_SUBDIVISION",
@@ -48,8 +48,8 @@ CANONICAL_TYPES = (
     "18_FULL_FACE_PHOTO_OR_OTHER_UNIQUE_IDENTIFIER",
 )
 
-# Typed markers used when rendering a category-labelled redaction. The neutral
-# marker below is what the evaluated de-identified note actually contains.
+# Optional category-labelled rendering. The runner builds a neutral [PHI]
+# representation internally for Pass 2 and saves offsets, not redacted text.
 TYPE_MARKERS = {
     "01_NAME": "[NAME]",
     "02_GEOGRAPHIC_SUBDIVISION": "[GEOGRAPHIC_SUBDIVISION]",
@@ -71,11 +71,9 @@ TYPE_MARKERS = {
     "18_FULL_FACE_PHOTO_OR_OTHER_UNIQUE_IDENTIFIER": "[OTHER_UNIQUE_IDENTIFIER]",
 }
 
-# Segmentation defaults (the locked protocol): 3,500-codepoint windows that
-# overlap by 400 codepoints so an identifier straddling a cut still appears
-# whole in one neighbouring window. To tune the window or overlap, edit these
-# two constants, or override them per run with the run_model --segment-size and
-# --overlap flags (both are threaded into fixed_segments below).
+# Study defaults: 3,500-codepoint windows with 400-codepoint overlap. Overlap
+# helps retain identifiers near boundaries; it does not guarantee coverage of
+# arbitrarily long identifiers. Use --segment-size / --overlap for other runs.
 SEGMENT_SIZE = 3500
 SEGMENT_OVERLAP = 400
 
@@ -369,12 +367,12 @@ def render(source: str, regions: Sequence[tuple[int, int]], markers: Sequence[st
 
 
 def neutral_redaction(source: str, regions: Sequence[tuple[int, int]]) -> str:
-    """Render every region with the neutral ``[PHI]`` marker (the scored note)."""
+    """Render predicted regions with ``[PHI]``; accuracy is scored from offsets."""
     return render(source, regions, [REDACTION_MARKER] * len(regions))
 
 
 def typed_redaction(source: str, predictions: Sequence[Prediction]) -> str:
-    """Render a category-labelled redaction (human-readable, not the scored note)."""
+    """Render category-labelled text for inspection; the runner does not save it."""
     components = overlap_components(predictions)
     markers = []
     for _, _, labels in components:

@@ -1,21 +1,13 @@
-"""Re-derive every de-identification metric from gold spans + resolved predictions.
+"""Score reference annotations against source-offset predictions.
 
-The scorer reads only two things per note:
+Character, span, and note-level accuracy use the reference PubAnnotation JSON
+and resolved_predictions.json. Operational metrics additionally read response
+telemetry, validation records, and the expected-segment manifests. The scorer
+does not render or read a final redacted note.
 
-* the gold PubAnnotation JSON (reference ``text`` plus typed character spans), and
-* the model's ``resolved_predictions.json`` (offsets + types, no identifier text).
-
-From those it recomputes character-, span-, note-, and reliability-level metrics
-under formulas defined here, and writes one long-format table plus supporting
-manifests. Outputs contain no clinical text, but document identifiers, source
-hashes, and local provenance may still be sensitive and require controlled
-storage when real clinical data are scored.
-
-Coordinate system: Unicode codepoints, half-open ``[start, end)``. The gold
-``text`` is the reference; Python ``str`` indexing is codepoint-based.
-
-Scoring is deterministic -- no randomness, no network. Point it at a directory
-of per-model outputs and a directory of gold files::
+Offsets use Unicode codepoints and half-open [start, end) intervals. Outputs do
+not contain clinical text, but document IDs, hashes, and provenance can still be
+sensitive. Keep real-data artifacts in controlled storage.
 
     python -m deid.metrics --pred-dir OUTPUT_ROOT --gold-dir GOLD --out-dir out/
 """
@@ -36,6 +28,7 @@ from typing import Any, Optional
 
 from . import __version__
 from .pipeline import CANONICAL_TYPES, PREDICTIONS_SCHEMA_VERSION
+from .provenance import expected_scopes, file_sha256
 
 
 class PredictionArtifactError(ValueError):
@@ -213,30 +206,43 @@ def load_predictions(model_dir: Path, doc_id: str, pass_number: int,
     return predictions
 
 
-def doc_operations(base_dir: Path, doc_id: str, pass_number: int) -> dict[str, Any]:
-    """Reliability and cost for one note/pass.
+def doc_operations(base_dir: Path, doc_id: str, pass_number: int,
+                   source_sha256: Optional[str] = None) -> dict[str, Any]:
+    """Read observed records and check them against the pre-request segment plan.
 
-    Segment count, finish reason, and tokens come from ``raw_responses`` (always
-    present); usable/valid envelope counts come from ``validation`` when that
-    subtree exists. ``base_dir`` is the pass-specific root (the model dir for
-    Pass 1, its ``pass_2`` child for Pass 2).
+    Format rates remain conditional on available validation records. A missing
+    plan (including legacy output) cannot establish operational completeness.
+    ``segments`` is the observed parseable-response count, not the expected count.
     """
+    expected = expected_scopes(base_dir, doc_id, pass_number, source_sha256)
+    raw_scopes: set[str] = set()
+    validation_scopes: set[str] = set()
+    artifacts_valid = True
+    finishes: dict[str, Any] = {}
     segments = stop = prompt_tokens = completion_tokens = 0
     raw_dir = base_dir / "raw_responses" / doc_id
     for raw_path in sorted(raw_dir.glob("*.raw.json")):
-        if not raw_path.name.startswith(f"P{pass_number}-"):
+        scope = raw_path.name[:-len(".raw.json")]
+        if not scope.startswith(f"P{pass_number}-"):
+            artifacts_valid = False
             continue
         try:
             envelope = json.loads(raw_path.read_text(encoding="utf-8"))
-        except ValueError:
+        except (OSError, ValueError):
+            artifacts_valid = False
             continue
+        if not isinstance(envelope, dict):
+            artifacts_valid = False
+            continue
+        raw_scopes.add(scope)
         segments += 1
-        choices = envelope.get("choices") if isinstance(envelope, dict) else None
+        choices = envelope.get("choices")
         choice = choices[0] if (isinstance(choices, list) and choices
                                 and isinstance(choices[0], dict)) else {}
-        if choice.get("finish_reason") == "stop":
+        finishes[scope] = choice.get("finish_reason")
+        if finishes[scope] == "stop":
             stop += 1
-        usage_value = envelope.get("usage") if isinstance(envelope, dict) else None
+        usage_value = envelope.get("usage")
         usage = usage_value if isinstance(usage_value, dict) else {}
         prompt_value = usage.get("prompt_tokens")
         completion_value = usage.get("completion_tokens")
@@ -246,27 +252,41 @@ def doc_operations(base_dir: Path, doc_id: str, pass_number: int) -> dict[str, A
     usable = valid = validated_seen = 0
     val_dir = base_dir / "validation" / doc_id
     for val_path in val_dir.glob("*.validation.json"):
+        scope = val_path.name[:-len(".validation.json")]
         try:
             record = json.loads(val_path.read_text(encoding="utf-8"))
-        except ValueError:
+        except (OSError, ValueError):
+            artifacts_valid = False
             continue
-        if not str(record.get("scope_id", "")).startswith(f"P{pass_number}"):
+        if (not isinstance(record, dict)
+                or not scope.startswith(f"P{pass_number}-")
+                or record.get("scope_id") != scope
+                or record.get("document_id") != doc_id
+                or type(record.get("envelope_usable")) is not bool
+                or type(record.get("strict_schema_valid")) is not bool):
+            artifacts_valid = False
             continue
+        validation_scopes.add(scope)
         validated_seen += 1
-        if record.get("envelope_usable"):
-            usable += 1
-        if record.get("strict_schema_valid"):
-            valid += 1
+        usable += int(record["envelope_usable"])
+        valid += int(record["strict_schema_valid"])
+        if record.get("finish_reason") != finishes.get(scope):
+            artifacts_valid = False
 
-    have_validation = validated_seen > 0
-    complete = segments > 0 and stop == segments and (usable == segments if have_validation else True)
+    if expected is not None and ((raw_scopes | validation_scopes) - expected):
+        raise ValueError(f"unexpected segment records for {doc_id}, pass {pass_number}")
+
+    coverage_verified = (expected is not None and artifacts_valid
+                         and raw_scopes == expected and validation_scopes == expected)
+    complete = coverage_verified and stop == len(expected) and usable == len(expected)
     return {
         "segments": segments, "stop": stop, "usable": usable, "valid": valid,
-        "have_validation": have_validation, "validation_records": validated_seen,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens, "complete": complete,
+        "expected_segments": len(expected) if expected is not None else None,
+        "coverage_verified": coverage_verified,
+        "have_validation": validated_seen > 0, "validation_records": validated_seen,
+        "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+        "complete": complete,
     }
-
 
 # --- per-document scoring ----------------------------------------------------
 
@@ -347,7 +367,7 @@ def aggregate(doc_records: list[tuple[str, dict[str, Any], dict[str, Any]]]) -> 
     ``doc_records`` is a list of ``(doc_id, score_record, ops_record)``.
     ``all_expected`` keeps every note (a missing output is a full miss);
     ``operational_complete`` keeps only notes whose every segment finished
-    cleanly and (where validated) was usable.
+    with verified request coverage, a stop finish reason, and a usable response.
     """
     out: dict[str, dict[str, Any]] = {}
     for cohort in COHORTS:
@@ -362,7 +382,7 @@ def aggregate(doc_records: list[tuple[str, dict[str, Any], dict[str, Any]]]) -> 
             "relaxed_pred": 0, "pred_span_count": 0,
             "zero_resid": 0, "leak": 0, "resid_list": [],
             "prompt_tokens": 0, "completion_tokens": 0,
-            "expected_requests": 0, "val_requests": 0, "usable": 0, "valid": 0, "stop": 0,
+            "expected_requests": 0, "expected_known": True, "val_requests": 0, "usable": 0, "valid": 0, "stop": 0,
             "recall_list": [], "precision_list": [], "f1_list": [],
             "strict_recall_list": [], "relaxed_recall_list": [],
             "per_type": {},
@@ -379,7 +399,10 @@ def aggregate(doc_records: list[tuple[str, dict[str, Any], dict[str, Any]]]) -> 
             agg["zero_resid"] += 1 if score["residual"] == 0 else 0
             agg["leak"] += 1 if score["residual"] > 0 else 0
 
-            agg["expected_requests"] += ops["segments"]
+            if ops.get("expected_segments") is None:
+                agg["expected_known"] = False
+            else:
+                agg["expected_requests"] += ops["expected_segments"]
             agg["stop"] += ops["stop"]
             agg["prompt_tokens"] += ops["prompt_tokens"]
             agg["completion_tokens"] += ops["completion_tokens"]
@@ -413,6 +436,8 @@ def aggregate(doc_records: list[tuple[str, dict[str, Any], dict[str, Any]]]) -> 
                 for key, value in values.items():
                     bucket[key] += value
 
+        if not agg.pop("expected_known"):
+            agg["expected_requests"] = None
         out[cohort] = agg
     return out
 
@@ -552,8 +577,9 @@ def output_documents(model_dir: Path) -> set[str]:
     """All document ids represented anywhere in a model's output subtrees."""
     doc_ids: set[str] = set()
     for relative in (
-        Path("resolved"), Path("raw_responses"), Path("validation"),
+        Path("resolved"), Path("raw_responses"), Path("validation"), Path("expected_segments"),
         Path("pass_2/resolved"), Path("pass_2/raw_responses"), Path("pass_2/validation"),
+        Path("pass_2/expected_segments"),
     ):
         subtree = model_dir / relative
         if subtree.is_dir():
@@ -648,7 +674,7 @@ def score_all(pred_dir: Path, gold_dir: Path) -> dict[str, list[dict[str, Any]]]
                 if predictions is None:
                     predictions = []
                 score = score_document(gold, predictions)
-                ops = doc_operations(base_dir, doc_id, pass_number)
+                ops = doc_operations(base_dir, doc_id, pass_number, gold["source_sha256"])
                 doc_records.append((doc_id, score, ops))
                 per_doc_rows.append({
                     "model_id": model_id, "n_docs": len(docs), "doc": doc_id, "pass_": pass_label,
@@ -659,6 +685,8 @@ def score_all(pred_dir: Path, gold_dir: Path) -> dict[str, list[dict[str, Any]]]
                     "gt_spans": score["all_spans"]["spans"], "any_span_hits": score["all_spans"]["any"],
                     "n_segments": ops["segments"], "usable_segments": ops["usable"],
                     "finish_stop": ops["stop"], "operational_complete": int(ops["complete"]),
+                    "expected_segments": ops["expected_segments"],
+                    "segment_coverage_verified": int(ops["coverage_verified"]),
                 })
             agg_by_pass[pass_label] = aggregate(doc_records)
 
@@ -704,6 +732,7 @@ def write_outputs(out_dir: Path, gold_dir: Path, results: dict[str, list[dict[st
         "model_id", "n_docs", "doc", "pass_", "doc_chars", "gt_phi_chars", "pred_phi_chars",
         "char_tp", "char_fp", "char_fn", "residual_phi_chars", "zero_residual", "gt_spans",
         "any_span_hits", "n_segments", "usable_segments", "finish_stop", "operational_complete",
+        "expected_segments", "segment_coverage_verified",
     ]
     write_csv(out_dir / "per_doc_long.csv", per_doc_columns, results["per_doc"])
     manifest_columns = [
@@ -716,6 +745,7 @@ def write_outputs(out_dir: Path, gold_dir: Path, results: dict[str, list[dict[st
     manifest_path = out_dir / "run_manifest.json"
     manifest_text = json.dumps({
         "code_version": __version__,
+        "scorer_sha256": file_sha256(Path(__file__)),
         "python_version": platform.python_version(),
         "platform": platform.platform(),
         "gold_source": gold_dir.name,
@@ -725,8 +755,9 @@ def write_outputs(out_dir: Path, gold_dir: Path, results: dict[str, list[dict[st
         "n_models": len(results["manifest"]),
         "cohorts": [
             "all_expected (all docs; a missing output is a full miss)",
-            "operational_complete (docs whose every segment finished stop and, if validated, was usable)",
+            "operational_complete (verified expected segments; every response finished stop and was usable)",
         ],
+        "request_coverage": "expected-segment manifests; legacy coverage is unknown without them",
         "passes": ["pass1", "cumulative_pass2 (Pass 1 union Pass 2)"],
         "surfaces": ["final (deterministic redaction from resolved_predictions.json)"],
         "recall_definition": "type-agnostic character coverage: gold PHI chars under any redaction / gold PHI chars",
