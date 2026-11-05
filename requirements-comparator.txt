@@ -1,0 +1,4 @@
+# Optional Presidio comparator dependencies.
+# Install the language model separately as described in docs/ANALYSIS.md.
+presidio-analyzer==2.2.364
+spacy==3.8.14

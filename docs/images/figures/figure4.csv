@@ -1,0 +1,2 @@
+model_id,any_span_recall,full_span_recall,relaxed_span_recall,strict_span_recall
+gemma-3-1b-it,0.7307692307692307,0.7307692307692307,0.6538461538461539,0.6538461538461539
